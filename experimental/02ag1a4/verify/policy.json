@@ -1,0 +1,91 @@
+{
+  "original_root": "ORIGINAL-02C2/skills",
+  "overlay_root": "ANTIGRAVITY-OVERLAY/skills",
+  "original_expected_count": 25,
+  "allowed_adaptations": [
+    "skills/pdd-operator/SKILL.md",
+    "skills/pinduoduo-buyer/SKILL.md"
+  ],
+  "rule_file": "antigravity/rules/PDD-SECTION.md",
+  "merged_candidate": "rule-migration/merged-candidate.md",
+  "deploy_manifest": "dry-run/DEPLOY-MANIFEST.json",
+  "prestate": "dry-run/PRESTATE.json",
+  "required_controls": [
+    "立即支付",
+    "提交订单",
+    "确认支付",
+    "去结算",
+    "直接拼成",
+    "全选",
+    "tap --force",
+    "收藏",
+    "не равна нулю",
+    "runtime_scroll=BLOCKED",
+    "skill_discovery_unverified",
+    "Жесты: запрет до приёмки"
+  ],
+  "gesture_phrases": [
+    "pdd.py scroll",
+    "pdd.py swipe",
+    "запрещено выполнять"
+  ],
+  "stale_tokens": [
+    "Gemini 3.8",
+    "scratch\\pdd-operator",
+    "все жесты защищены",
+    "--operator-dir",
+    "PDD_OPERATOR_DIR"
+  ],
+  "negations": [
+    "не существует",
+    "не создавать",
+    "не подменять",
+    "запрещ",
+    "не является",
+    "не должно"
+  ],
+  "required_buyer_path": "~/.gemini/config/skills/pinduoduo-buyer/SKILL.md",
+  "required_runtime_path": "%USERPROFILE%\\.codex\\pdd-operator",
+  "forbidden_suffixes": [
+    ".private.json",
+    ".pyc",
+    ".log",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".zip"
+  ],
+  "forbidden_names": [
+    "config.yaml",
+    "state.json",
+    "cookies",
+    "Cookies",
+    "History",
+    "latest.txt"
+  ],
+  "forbidden_dirs": [
+    "__pycache__",
+    "logs",
+    "profile",
+    ".git"
+  ],
+  "private_markers": [
+    "user-profile.private.json",
+    "cargo-address-reference.png"
+  ],
+  "blocked_candidate_hashes": [
+    "0666ee5ce9227fe3ce2c45877d757df562dcee5b6b329323d7f9d4db99ec2792",
+    "ceb8872b518e85fee987218eff62002926d4d9dc19995be08b4a90f9b05a7ba6"
+  ],
+  "pii_patterns": [
+    "\\b1[3-9]\\d{9}\\b",
+    "TG\\d{4}-\\d{4}"
+  ],
+  "frontmatter_required": [
+    "name",
+    "description"
+  ],
+  "press_permission": "(можно|разрешено|допустимо|не\\s+запрещено|нажмите|нажимайте|нажать|следует\\s+нажать|предлагать\\s+нажать)",
+  "press_price": "(цен|стоимост|узнать|проверить|проверк)",
+  "press_prohibit": "(не\\s+нажимать|не\\s+предлагать|запрещено\\s+нажимать|запрещено\\s+предлагать|нажимать[^.]{0,60}запрещено|нельзя)"
+}

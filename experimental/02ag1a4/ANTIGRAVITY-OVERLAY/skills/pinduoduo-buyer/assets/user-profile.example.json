@@ -1,0 +1,23 @@
+{
+  "version": "1.0.1",
+  "default_mode": "value_first",
+  "result_count": {
+    "min": 3,
+    "max": 5,
+    "do_not_pad": true
+  },
+  "significant_savings_percent_heuristic": 25,
+  "budget": null,
+  "budget_currency": null,
+  "budget_scope": null,
+  "destination_country": null,
+  "forwarder": null,
+  "phone_os": null,
+  "allow_unbranded": true,
+  "condition_default": "new",
+  "persistent_profile_requires_consent": true,
+  "seller_messaging_authorized": false,
+  "account_writes_authorized": false,
+  "purchasing_authorized": false,
+  "notes": "Generic blank example only. Store personal information in a separate local private profile and never commit it."
+}

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Pinduoduo: мобильный оператор (ADB)"
+  short_description: "Управление Pinduoduo на телефоне через ADB, 5-этапная проверка карточек и сверка со Стратегом"
+  default_prompt: "Используй $pdd-operator и $pinduoduo-buyer для поиска, 5-этапной проверки карточек и сохранения лучших вариантов в избранное (收藏) на телефоне в приложении Pinduoduo."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,110 @@
+{
+  "generated": "2026-11-13",
+  "source": "TEMPLATE - replace with read-only inventory of the live target",
+  "targets": {
+    "~/.gemini/config/skills/adb-wifi-qr/agents/openai.yaml": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/skills/adb-wifi-qr/scripts/adb_wifi_qr.py": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/skills/adb-wifi-qr/scripts/test_adb_wifi_qr.py": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/skills/adb-wifi-qr/SKILL.md": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/skills/pdd-operator/agents/openai.yaml": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/skills/pdd-operator/SKILL.md": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/skills/pinduoduo-buyer/assets/PORTABLE_PROMPT_RU.md": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/skills/pinduoduo-buyer/assets/search-session.template.json": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/skills/pinduoduo-buyer/assets/user-profile.example.json": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/skills/pinduoduo-buyer/README_RU.md": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/skills/pinduoduo-buyer/references/acceptance-tests.md": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/skills/pinduoduo-buyer/references/category-profiles.md": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/skills/pinduoduo-buyer/references/chinese-glossary.md": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/skills/pinduoduo-buyer/references/decision-policy.md": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/skills/pinduoduo-buyer/references/device-and-permissions.md": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/skills/pinduoduo-buyer/references/evidence-audit.md": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/skills/pinduoduo-buyer/references/intake-and-categories.md": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/skills/pinduoduo-buyer/references/marketplace-playbook.md": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/skills/pinduoduo-buyer/references/output-contract.md": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/skills/pinduoduo-buyer/references/shipping-profile.md": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/skills/pinduoduo-buyer/scripts/compare_prices.py": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/skills/pinduoduo-buyer/scripts/test_compare_prices.py": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/skills/pinduoduo-buyer/scripts/test_validate_offer_evidence.py": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/skills/pinduoduo-buyer/scripts/validate_offer_evidence.py": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/skills/pinduoduo-buyer/SKILL.md": {
+      "exists": false,
+      "sha256": null
+    },
+    "~/.gemini/config/rules/AGENTS.md": {
+      "exists": true,
+      "sha256": "a8258a36ef3253f247f951789f86d1321aa4305c9ea3dde68561a4b7ecf0a4f9"
+    }
+  }
+}

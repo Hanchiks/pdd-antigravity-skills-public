@@ -1,0 +1,144 @@
+{
+  "ok": false,
+  "ops": [
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/adb-wifi-qr/agents/openai.yaml",
+      "expected_after": "48c2240009e0230cc0d1296c360a9fe9d2317e036df6fcd5b346d8357f7889b4"
+    },
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/adb-wifi-qr/scripts/adb_wifi_qr.py",
+      "expected_after": "8c6da9fd3c4b30707160f7cac7227eb32deab9e5435d6daf015b7de7e12e8f48"
+    },
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/adb-wifi-qr/scripts/test_adb_wifi_qr.py",
+      "expected_after": "195b14bc99325f50c0cb378cb1a0a90a4c132cbcf1af7df6c35214621ce623b0"
+    },
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/adb-wifi-qr/SKILL.md",
+      "expected_after": "c971e3e8fb8175a1585eba3724b844cf6df811d8c6d01c7f37f672f9fe795159"
+    },
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/pdd-operator/agents/openai.yaml",
+      "expected_after": "5ec65e0a0199e726eb447a480887fef371c383d5baa8dc5a2e9532012e1801a0"
+    },
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/pdd-operator/SKILL.md",
+      "expected_after": "f8cfcc7f88a53e581dbb03a947c95d79bce98e1ad81816e1b68989cbce410099"
+    },
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/assets/PORTABLE_PROMPT_RU.md",
+      "expected_after": "869807d2e5afafb59f9a941a7683d91ccc65a5e4ab78143b3576d876ee645ec3"
+    },
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/assets/search-session.template.json",
+      "expected_after": "f79cd045ec7ce41425d658c3f41bcbf961a00afd60a3241168effc934aa2318c"
+    },
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/assets/user-profile.example.json",
+      "expected_after": "877aaebe5e7ab9804b488d53a9836236dab8298a8024c0663e592e0d1ba8aa67"
+    },
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/README_RU.md",
+      "expected_after": "2388fc1c1f6b24526049418bebe3931c99371a0f510b511260463834a83d5216"
+    },
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/references/acceptance-tests.md",
+      "expected_after": "03dd9f6fe5bcde8f4cdbd1f37901b445e4f8a1ebcf30e14d227ee48b47a10418"
+    },
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/references/category-profiles.md",
+      "expected_after": "e329d053d79eb9dbc6d70b8da042b886fcccdab11f53ce314d51d6a72a5e41ca"
+    },
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/references/chinese-glossary.md",
+      "expected_after": "6d56ab6a8abc1b459bfc45bff22647d633c5621f7d961fe7f1b220d9332e5eb7"
+    },
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/references/decision-policy.md",
+      "expected_after": "19015e7250822b423da256e08122ff5dcc8d81e4032b3aca12103f0cfa2fe996"
+    },
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/references/device-and-permissions.md",
+      "expected_after": "9797e98c16c711f19582c0c37541a43c160b4eebde21309b957a5428e2e7b505"
+    },
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/references/evidence-audit.md",
+      "expected_after": "5fdfe9fc71f3be1bd769532eed4937a0cd7ebc45f33986c12d9902540c13a4f1"
+    },
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/references/intake-and-categories.md",
+      "expected_after": "8913ca4877c75cf9a47843e6c4b4b4b65cfa2fc2574bcd3b3e95b132223b4d19"
+    },
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/references/marketplace-playbook.md",
+      "expected_after": "c8f95097bfe73de3dbb4acd694c047fef091b31983c25b2ba71cd1ef13cb7bd1"
+    },
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/references/output-contract.md",
+      "expected_after": "e5c0119a71a14c41e883dbf4654a3092fa3a7d4d7398e5c05fdf761b0ed22333"
+    },
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/references/shipping-profile.md",
+      "expected_after": "d71903308088f6a852791077572d9d7d55fd16210a11f87177ad4566af5070d0"
+    },
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/scripts/compare_prices.py",
+      "expected_after": "db03e22a55eac5c3bd7ce1dee934844d20b4c411a6747e99ce02abfd8ce668b7"
+    },
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/scripts/test_compare_prices.py",
+      "expected_after": "9cd8dcd56a985120e39799440c16b057b8251f955c58f354075efe5661bab973"
+    },
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/scripts/test_validate_offer_evidence.py",
+      "expected_after": "dd9fb42b3877f72a5352d3f90c79fcd9a50a186653688f4e69ec0b88ce11181d"
+    },
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/scripts/validate_offer_evidence.py",
+      "expected_after": "498ae1ba85e58ff9c5884de1d7d871f186dd51f1ac395adb53b2e6e4ad249cee"
+    },
+    {
+      "op": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/SKILL.md",
+      "expected_after": "fa2048240fae59566f82a7ed9625206ea56667961335e91eda63336329c1374b"
+    }
+  ],
+  "errors": [
+    {
+      "code": "backup_pending",
+      "target": "~/.gemini/config/rules/AGENTS.md",
+      "detail": ""
+    }
+  ],
+  "deployable": false,
+  "status": "not_deployable",
+  "counts": {
+    "create": 25,
+    "replace": 0,
+    "skip": 0
+  }
+}

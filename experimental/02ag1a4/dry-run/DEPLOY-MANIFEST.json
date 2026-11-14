@@ -1,0 +1,211 @@
+{
+  "package": "pdd-02ag1p2-staging",
+  "staged_only": true,
+  "target_root": "~/.gemini/config",
+  "requires": [
+    "fresh live prestate inventory",
+    "verified on-disk backup",
+    "independent acceptance"
+  ],
+  "actions": [
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/adb-wifi-qr/agents/openai.yaml",
+      "source": "ANTIGRAVITY-OVERLAY/skills/adb-wifi-qr/agents/openai.yaml",
+      "sha256": "48c2240009e0230cc0d1296c360a9fe9d2317e036df6fcd5b346d8357f7889b4",
+      "bytes": 485
+    },
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/adb-wifi-qr/scripts/adb_wifi_qr.py",
+      "source": "ANTIGRAVITY-OVERLAY/skills/adb-wifi-qr/scripts/adb_wifi_qr.py",
+      "sha256": "8c6da9fd3c4b30707160f7cac7227eb32deab9e5435d6daf015b7de7e12e8f48",
+      "bytes": 8281
+    },
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/adb-wifi-qr/scripts/test_adb_wifi_qr.py",
+      "source": "ANTIGRAVITY-OVERLAY/skills/adb-wifi-qr/scripts/test_adb_wifi_qr.py",
+      "sha256": "195b14bc99325f50c0cb378cb1a0a90a4c132cbcf1af7df6c35214621ce623b0",
+      "bytes": 6263
+    },
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/adb-wifi-qr/SKILL.md",
+      "source": "ANTIGRAVITY-OVERLAY/skills/adb-wifi-qr/SKILL.md",
+      "sha256": "c971e3e8fb8175a1585eba3724b844cf6df811d8c6d01c7f37f672f9fe795159",
+      "bytes": 2630
+    },
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/pdd-operator/agents/openai.yaml",
+      "source": "ANTIGRAVITY-OVERLAY/skills/pdd-operator/agents/openai.yaml",
+      "sha256": "5ec65e0a0199e726eb447a480887fef371c383d5baa8dc5a2e9532012e1801a0",
+      "bytes": 596
+    },
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/pdd-operator/SKILL.md",
+      "source": "ANTIGRAVITY-OVERLAY/skills/pdd-operator/SKILL.md",
+      "sha256": "f8cfcc7f88a53e581dbb03a947c95d79bce98e1ad81816e1b68989cbce410099",
+      "bytes": 47025
+    },
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/assets/PORTABLE_PROMPT_RU.md",
+      "source": "ANTIGRAVITY-OVERLAY/skills/pinduoduo-buyer/assets/PORTABLE_PROMPT_RU.md",
+      "sha256": "869807d2e5afafb59f9a941a7683d91ccc65a5e4ab78143b3576d876ee645ec3",
+      "bytes": 37833
+    },
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/assets/search-session.template.json",
+      "source": "ANTIGRAVITY-OVERLAY/skills/pinduoduo-buyer/assets/search-session.template.json",
+      "sha256": "f79cd045ec7ce41425d658c3f41bcbf961a00afd60a3241168effc934aa2318c",
+      "bytes": 4920
+    },
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/assets/user-profile.example.json",
+      "source": "ANTIGRAVITY-OVERLAY/skills/pinduoduo-buyer/assets/user-profile.example.json",
+      "sha256": "877aaebe5e7ab9804b488d53a9836236dab8298a8024c0663e592e0d1ba8aa67",
+      "bytes": 720
+    },
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/README_RU.md",
+      "source": "ANTIGRAVITY-OVERLAY/skills/pinduoduo-buyer/README_RU.md",
+      "sha256": "2388fc1c1f6b24526049418bebe3931c99371a0f510b511260463834a83d5216",
+      "bytes": 16554
+    },
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/references/acceptance-tests.md",
+      "source": "ANTIGRAVITY-OVERLAY/skills/pinduoduo-buyer/references/acceptance-tests.md",
+      "sha256": "03dd9f6fe5bcde8f4cdbd1f37901b445e4f8a1ebcf30e14d227ee48b47a10418",
+      "bytes": 20304
+    },
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/references/category-profiles.md",
+      "source": "ANTIGRAVITY-OVERLAY/skills/pinduoduo-buyer/references/category-profiles.md",
+      "sha256": "e329d053d79eb9dbc6d70b8da042b886fcccdab11f53ce314d51d6a72a5e41ca",
+      "bytes": 14054
+    },
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/references/chinese-glossary.md",
+      "source": "ANTIGRAVITY-OVERLAY/skills/pinduoduo-buyer/references/chinese-glossary.md",
+      "sha256": "6d56ab6a8abc1b459bfc45bff22647d633c5621f7d961fe7f1b220d9332e5eb7",
+      "bytes": 20529
+    },
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/references/decision-policy.md",
+      "source": "ANTIGRAVITY-OVERLAY/skills/pinduoduo-buyer/references/decision-policy.md",
+      "sha256": "19015e7250822b423da256e08122ff5dcc8d81e4032b3aca12103f0cfa2fe996",
+      "bytes": 26747
+    },
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/references/device-and-permissions.md",
+      "source": "ANTIGRAVITY-OVERLAY/skills/pinduoduo-buyer/references/device-and-permissions.md",
+      "sha256": "9797e98c16c711f19582c0c37541a43c160b4eebde21309b957a5428e2e7b505",
+      "bytes": 10816
+    },
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/references/evidence-audit.md",
+      "source": "ANTIGRAVITY-OVERLAY/skills/pinduoduo-buyer/references/evidence-audit.md",
+      "sha256": "5fdfe9fc71f3be1bd769532eed4937a0cd7ebc45f33986c12d9902540c13a4f1",
+      "bytes": 20228
+    },
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/references/intake-and-categories.md",
+      "source": "ANTIGRAVITY-OVERLAY/skills/pinduoduo-buyer/references/intake-and-categories.md",
+      "sha256": "8913ca4877c75cf9a47843e6c4b4b4b65cfa2fc2574bcd3b3e95b132223b4d19",
+      "bytes": 17313
+    },
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/references/marketplace-playbook.md",
+      "source": "ANTIGRAVITY-OVERLAY/skills/pinduoduo-buyer/references/marketplace-playbook.md",
+      "sha256": "c8f95097bfe73de3dbb4acd694c047fef091b31983c25b2ba71cd1ef13cb7bd1",
+      "bytes": 17396
+    },
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/references/output-contract.md",
+      "source": "ANTIGRAVITY-OVERLAY/skills/pinduoduo-buyer/references/output-contract.md",
+      "sha256": "e5c0119a71a14c41e883dbf4654a3092fa3a7d4d7398e5c05fdf761b0ed22333",
+      "bytes": 16887
+    },
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/references/shipping-profile.md",
+      "source": "ANTIGRAVITY-OVERLAY/skills/pinduoduo-buyer/references/shipping-profile.md",
+      "sha256": "d71903308088f6a852791077572d9d7d55fd16210a11f87177ad4566af5070d0",
+      "bytes": 6459
+    },
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/scripts/compare_prices.py",
+      "source": "ANTIGRAVITY-OVERLAY/skills/pinduoduo-buyer/scripts/compare_prices.py",
+      "sha256": "db03e22a55eac5c3bd7ce1dee934844d20b4c411a6747e99ce02abfd8ce668b7",
+      "bytes": 8428
+    },
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/scripts/test_compare_prices.py",
+      "source": "ANTIGRAVITY-OVERLAY/skills/pinduoduo-buyer/scripts/test_compare_prices.py",
+      "sha256": "9cd8dcd56a985120e39799440c16b057b8251f955c58f354075efe5661bab973",
+      "bytes": 7285
+    },
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/scripts/test_validate_offer_evidence.py",
+      "source": "ANTIGRAVITY-OVERLAY/skills/pinduoduo-buyer/scripts/test_validate_offer_evidence.py",
+      "sha256": "dd9fb42b3877f72a5352d3f90c79fcd9a50a186653688f4e69ec0b88ce11181d",
+      "bytes": 18954
+    },
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/scripts/validate_offer_evidence.py",
+      "source": "ANTIGRAVITY-OVERLAY/skills/pinduoduo-buyer/scripts/validate_offer_evidence.py",
+      "sha256": "498ae1ba85e58ff9c5884de1d7d871f186dd51f1ac395adb53b2e6e4ad249cee",
+      "bytes": 15316
+    },
+    {
+      "action": "create",
+      "target": "~/.gemini/config/skills/pinduoduo-buyer/SKILL.md",
+      "source": "ANTIGRAVITY-OVERLAY/skills/pinduoduo-buyer/SKILL.md",
+      "sha256": "fa2048240fae59566f82a7ed9625206ea56667961335e91eda63336329c1374b",
+      "bytes": 34954
+    },
+    {
+      "action": "rule_replace",
+      "target": "~/.gemini/config/rules/AGENTS.md",
+      "source": "antigravity/rules/PDD-SECTION.md",
+      "sha256": "023f5b2a36b313b8ed683bc89fa160397152e1ac1f89809e9feb151545b963c9",
+      "bytes": 7927,
+      "backup": {
+        "path": "_backup-02ag1p2/AGENTS.md",
+        "sha256": "e52f444760701972c88bfd8155d2483d6b6cdb4481982965bcf7ea99494d3d36",
+        "verified": false
+      },
+      "note": "требуется свежая проверенная копия живого файла; redacted-фикстура не доказывает содержимое живого правила"
+    }
+  ],
+  "explicitly_not_installed": [
+    "02D1 candidate 0666ee5c",
+    "02D1F candidate ceb8872b"
+  ],
+  "status": [
+    "skill_discovery_unverified",
+    "concurrency_unknown",
+    "runtime_scroll=BLOCKED",
+    "source_not_yet_verified",
+    "cmd_swipe risk open"
+  ]
+}

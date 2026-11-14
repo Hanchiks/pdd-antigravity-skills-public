@@ -1,0 +1,134 @@
+{
+  "version": "1.0.1",
+  "synthetic": false,
+  "requirements_revision": 0,
+  "task_id": "",
+  "started_at": null,
+  "access_mode": null,
+  "request": "",
+  "requirements": {
+    "must_have": [],
+    "nice_to_have": [],
+    "acceptable_tradeoffs": [],
+    "entry_format": "criterion | source_quote | origin=user|safety|derived|agent_heuristic|assumption | status=confirmed|assumed|needs_clarification",
+    "budget": null,
+    "currency": null,
+    "budget_scope": "china",
+    "destination": null,
+    "logistics": {
+      "profile_id": null,
+      "route": null,
+      "comparison_basis": "china",
+      "ask_international_shipping": null
+    }
+  },
+  "permissions": {
+    "favorite_selected_candidates": false,
+    "message_sellers": false,
+    "change_account": false,
+    "purchase": false,
+    "persist_profile": false
+  },
+  "queries": [],
+  "reviewed_result_count": 0,
+  "reference_id": null,
+  "candidates": [],
+  "candidate_record_template": {
+    "id": "",
+    "comparison_group": "",
+    "quantity": 1,
+    "currency": "CNY",
+    "gate": "conditional",
+    "gate_reasons": [],
+    "gate_reason_format": "code=violates_must_have|unknown_critical; criterion; basis; limits. not_applicable and unknown_minor belong in criterion notes/unknowns, not in gate_reasons",
+    "evaluated_at_revision": 0,
+    "next_check": null,
+    "applicability_notes": [],
+    "available": null,
+    "title_zh": "",
+    "title_ru": "",
+    "store_name": "",
+    "product_url": null,
+    "observed_share_code": null,
+    "product_id": null,
+    "listing_locator": null,
+    "sku_zh": "",
+    "sku_ru": "",
+    "favorited_in_app": null,
+    "favorite_action": null,
+    "observed_at": null,
+    "access_mode": null,
+    "offer_evidence": {
+      "listing_ref": null,
+      "sku_zh": null,
+      "store_name": null,
+      "quantity": null,
+      "currency": "CNY",
+      "price_cny": null,
+      "observed_at": null,
+      "source": null,
+      "delivery_destination": null,
+      "discount": {
+        "kind": "unknown",
+        "terms": null,
+        "applies": null,
+        "ordinary_price_cny": null,
+        "source": null
+      }
+    },
+    "costs": {
+      "goods": {
+        "amount": null,
+        "certainty": "unknown",
+        "source": ""
+      },
+      "delivery_cn": {
+        "amount": null,
+        "certainty": "unknown",
+        "source": ""
+      },
+      "inspection": {
+        "amount": null,
+        "certainty": "unknown",
+        "source": ""
+      },
+      "delivery_intl": {
+        "amount": null,
+        "certainty": "unknown",
+        "source": ""
+      },
+      "duties": {
+        "amount": null,
+        "certainty": "unknown",
+        "source": ""
+      },
+      "payment": {
+        "amount": null,
+        "certainty": "unknown",
+        "source": ""
+      },
+      "other": {
+        "amount": null,
+        "certainty": "unknown",
+        "source": ""
+      }
+    },
+    "discount_conditions": [],
+    "observed_facts": [],
+    "seller_claims": [],
+    "externally_verified": [],
+    "inferences": [],
+    "unknowns": [],
+    "review_sample": {
+      "count": 0,
+      "selection_method": "",
+      "sku_filter_available": null,
+      "recurring_issues": []
+    },
+    "evidence_refs": [],
+    "benefits": [],
+    "tradeoffs": [],
+    "confidence": null
+  },
+  "instructions": "Copy candidate_record_template into candidates and fill observed evidence. offer_evidence links the observed price to the exact SKU, listing, shop and quantity; listing_ref equals a candidate URL, share code, product_id or listing_locator. Use exactly the same source reference as costs.goods.source. Set delivery_destination to saved_cn_warehouse only when verified; do not copy the address. Discount kind is none, conditional or unknown; for conditional record actual terms, applicability, ordinary price and source. Run scripts/validate_offer_evidence.py on the session before final recommendations, treating problems as unverified and explaining them. A clean check verifies internal consistency only. For decision-changing requirements store source_quote, criterion, origin and status. Gate reasons use codes: violates_must_have, unknown_critical; not_applicable is an applicability note, not a gate reason. Do not treat null as zero. Do not turn unknown into absent. favorite_action is separate from gate: none, saved, cannot_save, removed. Increment requirements_revision when a requirement changes; re-evaluate affected candidates and resume their next_check instead of upgrading status automatically; 'can pay more' does not set a new ceiling. Do not include secrets or full addresses. Use the private owner route without copying full address/phone here. Run the price script with --basis china unless landed cost was explicitly requested. Unknown international freight does not block normal selection."
+}
