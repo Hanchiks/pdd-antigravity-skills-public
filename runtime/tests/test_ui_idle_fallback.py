@@ -1,3 +1,8 @@
+"""Категория (б): офлайн-заглушки, а не устройство.
+
+ADB/DOM/UI подменены моками; зелёный прогон не подтверждает поведение на
+реальном телефоне или в браузере.
+"""
 import types
 import unittest
 from unittest.mock import patch
@@ -17,6 +22,11 @@ class UiIdleFallbackTests(unittest.TestCase):
         self.addCleanup(self.update.stop)
         for name in ("ensure_device", "out"):
             p = patch.object(pdd, name)
+            p.start()
+            self.addCleanup(p.stop)
+        for name, value in (("screen_info", {"real_w": 1080, "real_h": 2400, "view_w": 720,
+                                             "view_h": 1600, "scale": 1.5}), ("SERIAL", "test-device")):
+            p = patch.object(pdd, name, return_value=value) if name == "screen_info" else patch.object(pdd, name, value)
             p.start()
             self.addCleanup(p.stop)
 
@@ -50,15 +60,13 @@ class UiIdleFallbackTests(unittest.TestCase):
         for attempts in ([(None, "bad", False), (None, "idle", True)],
                          [(None, "idle", True), (None, "bad", False), (None, "idle", True)]):
             with self.subTest(attempts=attempts), \
-                 patch.object(pdd, "_dump_ui_attempts", side_effect=attempts), \
-                 patch.object(pdd, "_close_live_player_after_failed_dump", return_value=len(attempts) == 3):
+                 patch.object(pdd, "_dump_ui_attempts", side_effect=attempts):
                 with self.assertRaises(pdd.AdbError) as error:
                     pdd.dump_ui_xml()
                 self.assertNotIsInstance(error.exception, pdd.UiIdleError)
 
     def test_all_idle_failure_has_specific_type(self):
-        with patch.object(pdd, "_dump_ui_attempts", return_value=(None, "ERROR: could not get idle state.", True)), \
-             patch.object(pdd, "_close_live_player_after_failed_dump", return_value=False):
+        with patch.object(pdd, "_dump_ui_attempts", return_value=(None, "ERROR: could not get idle state.", True)):
             with self.assertRaises(pdd.UiIdleError):
                 pdd.dump_ui_xml()
 
