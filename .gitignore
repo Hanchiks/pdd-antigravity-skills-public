@@ -1,0 +1,29 @@
+# Local profiles, account sessions and credentials
+*.private.json
+*.local.json
+.env
+.env.*
+!.env.example
+profile/
+profiles/
+work/
+logs/
+*.log
+*.pem
+*.key
+*.p12
+*.pfx
+*cookie*
+*session*.json
+!search-session.template.json
+# Screen captures and device dumps can contain personal data
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.xml
+latest.txt
+# Python
+__pycache__/
+*.py[cod]
+.venv/

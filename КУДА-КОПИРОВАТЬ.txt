@@ -1,0 +1,18 @@
+КУДА КОПИРОВАТЬ
+================
+1) Папки из skills\ целиком положить в:
+   %USERPROFILE%\.gemini\config\skills\
+   Должно получиться:
+     .gemini\config\skills\pinduoduo-buyer\
+     .gemini\config\skills\pdd-operator\
+     .gemini\config\skills\adb-wifi-qr\
+
+2) Файл rules\PDD-SECTION.md — это правила для Pinduoduo.
+   Добавить его содержимое в %USERPROFILE%\.gemini\config\rules\AGENTS.md
+   (или подключить отдельным файлом, если среда умеет).
+   Старый PDD-блок в AGENTS.md при этом нужно заменить, а не дописать вторым.
+
+3) Перезапустить Antigravity и проверить, что навыки видны в списке.
+   Наличие файлов само по себе не доказывает, что среда их подхватила.
+
+Ничего не устанавливается автоматически: это просто копия файлов.

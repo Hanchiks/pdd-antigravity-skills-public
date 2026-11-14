@@ -1,0 +1,6 @@
+interface:
+  display_name: "Android: Wi-Fi по коду"
+  short_description: "Сопряжение по 6-значному коду и IP:портам, проверка ADB без QR"
+  default_prompt: "Используй $adb-wifi-qr, чтобы подключить телефон по 6-значному коду сопряжения и двум IP:портам (сопряжение и подключение); QR не создавай."
+policy:
+  allow_implicit_invocation: true
