@@ -1,3 +1,9 @@
+"""Категория (б): офлайн-заглушки, а не устройство.
+
+ADB/DOM/UI подменены моками; зелёный прогон не подтверждает поведение на
+реальном телефоне или в браузере.
+"""
+import subprocess
 import types
 import unittest
 from unittest.mock import patch
@@ -127,11 +133,16 @@ class SafetyTests(unittest.TestCase):
             if "uiautomator" in cmd:
                 return types.SimpleNamespace(returncode=0, stdout=b"", stderr=error)
             return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        # Старое ожидание автоматического закрытия плеера при ошибке idle было
+        # неверным: путь чтения обязан быть пассивным. Теперь dump_ui_xml
+        # сообщает о недоступности дерева и предлагает явную команду.
         with patch.object(pdd.subprocess, "run", side_effect=subprocess_run), \
-             patch.object(pdd, "_close_live_player_after_failed_dump", return_value=False) as close:
-            with self.assertRaisesRegex(pdd.AdbError, "could not get idle state"):
+             patch.object(pdd, "tap_real") as tap:
+            with self.assertRaisesRegex(pdd.AdbError, "could not get idle state") as err:
                 pdd.dump_ui_xml()
-            close.assert_called_once()
+            tap.assert_not_called()
+            self.assertIn("автоматических действий", str(err.exception))
+            self.assertIn("close-player", str(err.exception))
 
     def test_run_adb_keeps_stderr_opt_in_for_other_callers(self):
         response = types.SimpleNamespace(returncode=0, stdout=b"output", stderr=b"diagnostic")
@@ -222,12 +233,18 @@ class SafetyTests(unittest.TestCase):
             pdd._check_target(630, 1470, [target, background, overlay])
 
     def test_force_skips_unknown_layer_but_preserves_hard_blocks(self):
+        # --force по-прежнему пропускает безымянный слой вне опасной нижней
+        # зоны, но не в ней самой: там назначение слоя доказать нельзя.
+        safe_target = element("商品评价", 300, 800, 160, 70, tree_path="0/0")
+        safe_overlay = element("<overlay>", 300, 800, 160, 70, tree_path="0/1", placeholder=True)
+        with patch.object(pdd, "read_ui_elements", return_value=[safe_target, safe_overlay]), \
+             patch.object(pdd, "tap_real") as tap:
+            pdd.cmd_tap(types.SimpleNamespace(x=300, y=800, long=0, force=True))
+            tap.assert_called_once()
         target = element("发起拼单", 630, 1470, 160, 70, tree_path="0/0")
         overlay = element("<overlay>", 630, 1470, 160, 70, tree_path="0/1", placeholder=True)
-        with patch.object(pdd, "read_ui_elements", return_value=[target, overlay]), \
-             patch.object(pdd, "tap_real") as tap:
-            pdd.cmd_tap(types.SimpleNamespace(x=630, y=1470, long=0, force=True))
-            tap.assert_called_once()
+        with self.assertRaises(pdd.AdbError):
+            pdd._check_target(630, 1470, [target, overlay], force=True)
         for label in ("立即支付", "提交订单", "确认支付", "去结算", "全选"):
             with self.subTest(label=label), self.assertRaises(pdd.AdbError):
                 pdd._check_target(630, 1470, [target, overlay, element(label, 630, 1470)], force=True)
@@ -256,6 +273,79 @@ class SafetyTests(unittest.TestCase):
                 with self.assertRaises(pdd.AdbError):
                     FOCUS_FN()
 
+    def test_window_change_between_check_and_tap_blocks(self):
+        tree = [element("收藏", 300, 300)]
+        with patch.object(pdd, "read_ui_elements", return_value=tree), \
+             patch.object(pdd, "_require_pdd_focus", side_effect=[None, pdd.AdbError("окно изменилось")]), \
+             patch.object(pdd, "tap_real") as tap:
+            with self.assertRaises(pdd.AdbError):
+                pdd.cmd_tap(types.SimpleNamespace(x=300, y=300, long=0))
+            tap.assert_not_called()
+
+    def test_unlabelled_clickable_in_bottom_zone_is_blocked_even_with_force(self):
+        target = element("发起拼单", 630, 1470, 160, 70, tree_path="0/0")
+        overlay = element("<overlay>", 630, 1470, 160, 70, tree_path="0/1", placeholder=True)
+        for force in (False, True):
+            with self.subTest(force=force), self.assertRaises(pdd.AdbError):
+                pdd._check_target(630, 1470, [target, overlay], force=force)
+
+    def test_unlabelled_clickable_outside_danger_zone_can_be_forced(self):
+        target = element("商品评价", 300, 800, 160, 70, tree_path="0/0")
+        overlay = element("<overlay>", 300, 800, 160, 70, tree_path="0/1", placeholder=True)
+        pdd._check_target(300, 800, [target, overlay], force=True)
+
+    def test_documented_mass_selection_synonym_is_forbidden(self):
+        e = element("Выбрать всё", 50, 1200)
+        self.assertTrue(pdd._is_forbidden(e))
+        for force in (False, True):
+            with self.subTest(force=force), self.assertRaises(pdd.AdbError):
+                pdd._check_target(50, 1200, [e], force=force)
+
+    def test_forbidden_container_and_mass_selection_zone_block_nested_label(self):
+        label = element("收藏", 50, 1470, 40, 40, tree_path="0/0/0")
+        container = element("全选 删除", 50, 1470, 100, 60, tree_path="0/0", click=False)
+        for force in (False, True):
+            with self.subTest(force=force), self.assertRaises(pdd.AdbError):
+                pdd._check_target(50, 1470, [container, label], force=force)
+        placeholder = element("<CheckBox>", 50, 1470, 40, 40, tree_path="0/1", placeholder=True)
+        for force in (False, True):
+            with self.subTest(force=force), self.assertRaises(pdd.AdbError):
+                pdd._check_target(50, 1470, [label, placeholder], force=force)
+
+    def test_tapel_refuses_multiple_unlabelled_targets(self):
+        els = [element("<CheckBox>", 50, 200, placeholder=True, tree_path="0/0"),
+               element("<CheckBox>", 50, 300, placeholder=True, tree_path="0/1")]
+        with patch.object(pdd, "load_state", return_value=self.state(els)), \
+             patch.object(pdd, "read_ui_elements", return_value=els), \
+             patch.object(pdd, "tap_real") as tap:
+            with self.assertRaisesRegex(pdd.AdbError, "безымянн"):
+                pdd.cmd_tapel(types.SimpleNamespace(indices=[0, 1], long=0))
+            tap.assert_not_called()
+
+    def test_tapel_refuses_multiple_targets_in_select_all_mode(self):
+        els = [element("商品甲", 200, 200, tree_path="0/0"),
+               element("商品乙", 200, 300, tree_path="0/1"),
+               element("全选", 50, 1470, tree_path="0/2")]
+        with patch.object(pdd, "load_state", return_value=self.state(els)), \
+             patch.object(pdd, "read_ui_elements", return_value=els), \
+             patch.object(pdd, "tap_real") as tap:
+            with self.assertRaisesRegex(pdd.AdbError, "массов"):
+                pdd.cmd_tapel(types.SimpleNamespace(indices=[0, 1], long=0))
+            tap.assert_not_called()
+
+    def test_tapel_output_does_not_claim_favorite_result(self):
+        target = [element("收藏", 135, 1475)]
+        with patch.object(pdd, "load_state", return_value=self.state(target)), \
+             patch.object(pdd, "read_ui_elements", return_value=target), \
+             patch.object(pdd, "tap_real"), patch.object(pdd, "out") as output:
+            pdd.cmd_tapel(types.SimpleNamespace(indices=[0], long=0))
+        payload = output.call_args.args[0]
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["confirmation"], "command_sent")
+        text = str(payload).lower()
+        for claim in ("удалено", "сохранено", "removed", "saved", "deleted"):
+            self.assertNotIn(claim, text)
+
     def test_sales_digest_separates_brand_shop_explicit_and_unknown(self):
         els = [element("品牌已拼4万+件", 100, 100), element("本店已拼1万件", 200, 200),
                element("商品已拼200件", 300, 300), element("已拼300件", 400, 400)]
@@ -264,6 +354,51 @@ class SafetyTests(unittest.TestCase):
         self.assertIn("Продажи магазина: [1]", digest)
         self.assertIn("Продажи карточки: [2]", digest)
         self.assertIn("Продажи, требующие проверки: [3]", digest)
+
+    def test_actions_refuse_changed_geometry_and_invalidate_cache(self):
+        # Кеш 1080x2400, но свежий screen_info возвращает другой размер.
+        stale = {"screen": {"serial": "test-device", "real_w": 2400, "real_h": 1080,
+                            "view_w": 720, "view_h": 540, "scale": 2.0}}
+        cases = [
+            ("tap", lambda: pdd.cmd_tap(types.SimpleNamespace(x=300, y=300, long=0))),
+            ("tapel", lambda: pdd.cmd_tapel(types.SimpleNamespace(indices=[0], long=0))),
+            ("text", lambda: pdd.cmd_text(types.SimpleNamespace(file=None, text="x", clear=False, enter=False))),
+            ("key", lambda: pdd.cmd_key(types.SimpleNamespace(key="back"))),
+        ]
+        for name, call in cases:
+            with self.subTest(action=name):
+                state = dict(stale)
+                def update(fn, state=state):
+                    return fn(state)
+                with patch.object(pdd, "load_state", return_value=state), \
+                     patch.object(pdd, "update_state", side_effect=update), \
+                     patch.object(pdd, "read_ui_elements") as read, \
+                     patch.object(pdd, "tap_real") as tap:
+                    with self.assertRaisesRegex(pdd.AdbError, "Геометрия экрана изменилась"):
+                        call()
+                    read.assert_not_called()
+                    tap.assert_not_called()
+                self.assertNotIn("screen", state)
+
+    def test_tap_timeout_reports_unknown_and_never_resends(self):
+        with patch.object(pdd, "run_adb",
+                          side_effect=subprocess.TimeoutExpired(cmd="adb", timeout=40)) as adb, \
+             patch.object(pdd, "pace") as pace:
+            with self.assertRaisesRegex(pdd.AdbError, "unknown") as err:
+                pdd.tap_real(450, 450)
+            self.assertIn("неизвестно", str(err.exception))
+            self.assertIn("Повтор вслепую", str(err.exception))
+            self.assertEqual(adb.call_count, 1)
+            pace.assert_not_called()
+
+    def test_tap_output_marks_command_sent_not_confirmed(self):
+        target = [element("收藏", 300, 300)]
+        with patch.object(pdd, "read_ui_elements", return_value=target), \
+             patch.object(pdd, "tap_real"), patch.object(pdd, "out") as output:
+            pdd.cmd_tap(types.SimpleNamespace(x=300, y=300, long=0))
+        payload = output.call_args.args[0]
+        self.assertEqual(payload["confirmation"], "command_sent")
+        self.assertNotIn("state_confirmed", str(payload))
 
 
 if __name__ == "__main__":

@@ -17,6 +17,8 @@
 """
 import argparse
 import base64
+import hashlib
+import http.client
 import json
 import mimetypes
 import os
@@ -26,16 +28,19 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import ExitStack
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from common import ROOT, StateError, load_config, load_state, log_dir, out, save_config, update_state
+from common import (ROOT, StateError, create_unique_file, draft_lock, load_config, load_state,
+                    log_dir, out, update_config, update_state)
 
 CFG = load_config()
 BR = CFG["browser"]
 PORT = int(BR.get("cdp_port", 9333))
 PROFILE = ROOT / "profile"
 PROVIDERS = ("gemini", "chatgpt")
+CDP_MAX_BYTES = 1024 * 1024
 
 
 class ChatError(RuntimeError):
@@ -45,12 +50,113 @@ class ChatError(RuntimeError):
 
 
 # ----------------------------------------------------------------- Browser process
-def cdp_alive():
+def _tcp_reachable(timeout=1.0):
     try:
-        with socket.create_connection(("127.0.0.1", PORT), timeout=1):
+        with socket.create_connection(("127.0.0.1", PORT), timeout=timeout):
             return True
     except OSError:
         return False
+
+
+def _http_json(path, timeout=1.5):
+    """Один HTTP GET к локальному CDP-эндпоинту; без прокси и без внешней сети."""
+    conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=timeout)
+    try:
+        conn.request("GET", path)
+        resp = conn.getresponse()
+        if resp.status != 200:
+            raise ValueError(f"CDP HTTP status {resp.status}")
+        raw = resp.read(CDP_MAX_BYTES + 1)
+        if len(raw) > CDP_MAX_BYTES:
+            raise ValueError("CDP response too large")
+        return json.loads(raw.decode("utf-8"))
+    finally:
+        conn.close()
+
+
+def _read_devtools_active_port():
+    """Порт и browser-путь из файла профиля, созданного самим Chrome."""
+    try:
+        lines = (PROFILE / "DevToolsActivePort").read_text(encoding="utf-8").splitlines()
+        if len(lines) < 2:
+            return None
+        return int(lines[0].strip()), lines[1].strip()
+    except (OSError, UnicodeError, ValueError):
+        return None
+
+
+def _valid_cdp_endpoint(value):
+    try:
+        parsed = urlsplit(value)
+        return (parsed.scheme in ("ws", "wss")
+                and parsed.hostname in ("127.0.0.1", "localhost", "::1")
+                and parsed.port == PORT
+                and not parsed.username and not parsed.password
+                and parsed.path.startswith("/devtools/browser/"))
+    except (TypeError, ValueError):
+        return False
+
+
+def cdp_probe():
+    """Проверить, что порт обслуживает именно наш Chrome с нашим профилем.
+
+    Открытый TCP-порт сам по себе ничего не доказывает. Проверяются
+    HTTP-эндпоинты CDP ``/json/version`` и ``/json/list``, согласованность
+    WebSocket-адреса с портом, а привязка к профилю — через файл
+    ``DevToolsActivePort``, который Chrome пишет в ``--user-data-dir``.
+    CDP не аутентифицирован, поэтому это проверка согласованности, а не
+    криптографическое доказательство: локальный процесс теоретически может
+    подделать и HTTP-ответ, и файл профиля. При любом сомнении — отказ.
+    """
+    result = {"port": PORT, "reachable": False, "verified": False,
+              "profile_verified": False, "reason": "port_closed"}
+    if not _tcp_reachable():
+        return result
+    result["reachable"] = True
+    try:
+        version = _http_json("/json/version")
+    except Exception:
+        result["reason"] = "not_cdp"
+        return result
+    if not isinstance(version, dict):
+        result["reason"] = "bad_version"
+        return result
+    browser = version.get("Browser")
+    if not isinstance(browser, str) or not re.match(r"^(Chrome|Chromium|HeadlessChrome)/\d", browser):
+        result["reason"] = "unexpected_browser"
+        return result
+    endpoint = version.get("webSocketDebuggerUrl")
+    if not _valid_cdp_endpoint(endpoint):
+        result["reason"] = "endpoint_mismatch"
+        return result
+    try:
+        targets = _http_json("/json/list")
+    except Exception:
+        result["reason"] = "bad_targets"
+        return result
+    if not isinstance(targets, list) or any(
+            not isinstance(t, dict) or not isinstance(t.get("id"), str) or not isinstance(t.get("type"), str)
+            for t in targets):
+        result["reason"] = "bad_targets"
+        return result
+    marker = _read_devtools_active_port()
+    if marker is None:
+        result["reason"] = "profile_marker_missing"
+        return result
+    marker_port, marker_path = marker
+    parsed_endpoint = urlsplit(endpoint)
+    if marker_port != PORT or marker_path != parsed_endpoint.path:
+        result["reason"] = "profile_marker_mismatch"
+        return result
+    result.update({"verified": True, "profile_verified": True, "reason": "ok",
+                   "browser": browser, "protocol": version.get("Protocol-Version"),
+                   "targets": len(targets)})
+    return result
+
+
+def cdp_alive():
+    """True только для подтверждённого нашего Chrome, а не любого занятия порта."""
+    return bool(cdp_probe()["verified"])
 
 
 def profile_in_use():
@@ -76,8 +182,12 @@ def chrome_path():
 
 
 def cmd_login(a):
-    if cdp_alive():
+    probe = cdp_probe()
+    if probe["verified"]:
         raise ChatError("BROWSER_RUNNING", "Фоновый браузер уже запущен — остановите его перед входом.")
+    if probe["reachable"]:
+        raise ChatError("CDP_UNVERIFIED", "Порт CDP занят процессом, который не подтверждён как наш Chrome; "
+                                          "вход не начат. Освободите порт вручную.")
     if profile_in_use():
         raise ChatError("PROFILE_IN_USE", "Окно Chrome с этим профилем уже открыто.")
     PROFILE.mkdir(exist_ok=True)
@@ -92,9 +202,13 @@ def cmd_login(a):
 
 
 def cmd_browser(a):
-    if cdp_alive():
-        out({"ok": True, "note": f"Браузер уже работает на порту {PORT}"})
+    probe = cdp_probe()
+    if probe["verified"]:
+        out({"ok": True, "note": f"Браузер уже работает на порту {PORT}", "cdp": probe})
         return
+    if probe["reachable"]:
+        raise ChatError("CDP_UNVERIFIED", f"Порт {PORT} занят процессом, который не подтверждён как наш Chrome "
+                                          f"({probe['reason']}); новый браузер не запускается.")
     if profile_in_use():
         raise ChatError("PROFILE_IN_USE", "Профиль занят открытым окном Chrome (вход?). Закройте его.")
     PROFILE.mkdir(exist_ok=True)
@@ -112,20 +226,34 @@ def cmd_browser(a):
         if cdp_alive():
             break
         time.sleep(0.5)
-    out({"ok": cdp_alive(), "mode": mode, "port": PORT, "pid": proc.pid,
-         "note": "Браузер работает. Эта задача должна оставаться запущенной."})
+    probe = cdp_probe()
+    out({"ok": probe["verified"], "mode": mode, "port": PORT, "pid": proc.pid, "cdp": probe,
+         "note": "Браузер работает. Эта задача должна оставаться запущенной." if probe["verified"]
+                 else "Браузер запущен, но CDP не подтвердил наш экземпляр и профиль; не используйте его для отправки."})
     proc.wait()
 
 
 # ----------------------------------------------------------------- CDP session
 class Session:
+    def __init__(self, create_context=True):
+        self.create_context = create_context
+
     def __enter__(self):
-        if not cdp_alive():
+        probe = cdp_probe()
+        if not probe["verified"]:
+            if probe["reachable"]:
+                raise ChatError("BROWSER_UNVERIFIED", "Порт CDP занят, но это не подтверждённый Chrome с нашим "
+                                                     f"профилем ({probe['reason']}); работа остановлена.")
             raise ChatError("BROWSER_DOWN", "Фоновый браузер не запущен. Запустите фоновую задачу: python chat.py browser")
         from playwright.sync_api import sync_playwright
         self.pw = sync_playwright().start()
         self.browser = self.pw.chromium.connect_over_cdp(f"http://127.0.0.1:{PORT}", timeout=20000)
-        self.ctx = self.browser.contexts[0] if self.browser.contexts else self.browser.new_context()
+        if self.browser.contexts:
+            self.ctx = self.browser.contexts[0]
+        elif self.create_context:
+            self.ctx = self.browser.new_context()
+        else:
+            self.ctx = None
         return self
 
     def __exit__(self, *exc):
@@ -151,26 +279,44 @@ def _valid_target(url, host):
         return False
 
 
-def get_page(s: Session, p, url=None):
+def _find_existing_page(s: Session, p, url=None):
+    """Найти подходящую уже открытую вкладку, ничего не создавая и не меняя."""
     c = provider_cfg(p)
     st = load_state()
     marker = st["chats"][p].get("prepared_id") if not url else None
+    ctx = getattr(s, "ctx", None)
+    pages = getattr(ctx, "pages", []) if ctx is not None else []
     if marker:
-        for candidate in s.ctx.pages:
+        for candidate in pages:
             try:
                 if candidate.evaluate("() => window.name") == marker:
                     return candidate
             except Exception:
                 continue
-        raise ChatError("PREPARED_TAB_MISSING", "Подготовленная вкладка не найдена; подготовьте и проверьте её заново")
+        return None
     target = url or st["chats"][p].get("url") or c["url"]
     if not _valid_target(target, c["host"]):
         raise ChatError("BAD_CHAT_URL", "Адрес чата не принадлежит выбранному сервису HTTPS")
     # Select the exact conversation, never an arbitrary tab on the same host.
-    page = next((pg for pg in s.ctx.pages if pg.url.rstrip("/") == target.rstrip("/")), None)
-    if page is None:
-        page = s.ctx.new_page()
-        page.goto(target, wait_until="domcontentloaded", timeout=60000)
+    return next((pg for pg in pages if pg.url.rstrip("/") == target.rstrip("/")), None)
+
+
+def get_page(s: Session, p, url=None, create=True):
+    c = provider_cfg(p)
+    st = load_state()
+    marker = st["chats"][p].get("prepared_id") if not url else None
+    page = _find_existing_page(s, p, url=url)
+    if page is not None:
+        return page
+    if not create:
+        return None
+    if marker:
+        raise ChatError("PREPARED_TAB_MISSING", "Подготовленная вкладка не найдена; подготовьте и проверьте её заново")
+    target = url or st["chats"][p].get("url") or c["url"]
+    if not _valid_target(target, c["host"]):
+        raise ChatError("BAD_CHAT_URL", "Адрес чата не принадлежит выбранному сервису HTTPS")
+    page = s.ctx.new_page()
+    page.goto(target, wait_until="domcontentloaded", timeout=60000)
     return page
 
 
@@ -219,12 +365,48 @@ def last_reply_text(page, c):
         return ""
 
 
-def is_generating(page, c):
+GENERATION_GENERATING = "generating"
+GENERATION_FINISHED = "finished"
+GENERATION_UNKNOWN = "unknown"
+
+
+class ReplyResult(str):
+    """Текст ответа вместе с явным состоянием генерации.
+
+    Остаётся строкой для совместимости: старые вызывающие и тестовые заглушки
+    могут возвращать обычный ``str``. Состояние доступно как ``.generation``.
+    """
+
+    def __new__(cls, text, generation):
+        obj = super().__new__(cls, text)
+        obj.generation = generation
+        return obj
+
+
+def generation_state(page, c):
+    """generating / finished / unknown для текущего ответа.
+
+    Если элементы индикатора генерации не найдены (селектор устарел, страница
+    ещё не загрузилась) или проверка недоступна, состояние — ``unknown``, а не
+    ``finished``. Неизвестное состояние запрещает заявлять полноту ответа.
+    """
     try:
         loc = page.locator(c["stop"])
-        return any(loc.nth(i).is_visible() for i in range(min(loc.count(), 3)))
+        count = loc.count()
     except Exception:
-        return False
+        return GENERATION_UNKNOWN
+    if count <= 0:
+        return GENERATION_UNKNOWN
+    try:
+        visible = any(loc.nth(i).is_visible() for i in range(min(count, 3)))
+    except Exception:
+        return GENERATION_UNKNOWN
+    return GENERATION_GENERATING if visible else GENERATION_FINISHED
+
+
+def is_generating(page, c):
+    """Совместимость: True только при подтверждённой генерации."""
+    return generation_state(page, c) == GENERATION_GENERATING
 
 
 JS_PASTE = """
@@ -348,24 +530,34 @@ def wait_reply(page, c, before, timeout):
     while assistant_texts(page, c)[0] <= before:
         if time.time() > deadline:
             raise ChatError("NO_REPLY", "Ответ не появился")
-        if time.time() > deadline - timeout + 180 and not is_generating(page, c) and assistant_texts(page, c)[0] <= before:
-            # 180 с без нового ответа и без генерации — вероятно, не отправилось или лимит
-            body = page.inner_text("body")[-1500:]
-            raise ChatError("NO_REPLY", "Ответ не начался за 90 с. Возможен лимит/ошибка. Хвост страницы: " + body)
+        state = generation_state(page, c)
+        if (time.time() > deadline - timeout + 180 and state == GENERATION_FINISHED
+                and assistant_texts(page, c)[0] <= before):
+            # 180 с без нового ответа и с подтверждённым завершением генерации —
+            # вероятно, не отправилось или лимит. Содержимое страницы в ошибку
+            # не попадает, чтобы не раскрывать задачу/ответ/секреты.
+            raise ChatError("NO_REPLY", "Ответ не начался за 90 с. Возможен лимит/ошибка; "
+                                        "содержимое страницы не выводится.")
         time.sleep(1)
-    stable_need = int(BR.get("stable_seconds", 4))
+    # Минимум два подтверждающих замера после первого: два одинаковых
+    # измерения подряд сами по себе не доказывают завершение.
+    stable_need = max(2, int(BR.get("stable_seconds", 4)))
     prev, stable = None, 0
     while time.time() < deadline:
         txt = last_reply_text(page, c)
-        if txt and txt == prev and not is_generating(page, c):
+        state = generation_state(page, c)
+        if txt and txt == prev and state == GENERATION_FINISHED:
             stable += 1
             if stable >= stable_need:
-                return txt
+                return ReplyResult(txt, GENERATION_FINISHED)
         else:
             stable = 0
         prev = txt
         time.sleep(1)
-    raise ChatError("TIMEOUT", "Ответ не завершился вовремя. Частичный текст:\n" + (prev or ""))
+    # Текст мог появиться, но завершение не подтверждено. Не выдаём частичный
+    # ответ за полный: состояние остаётся unknown.
+    raise ChatError("TIMEOUT", "Ответ не подтверждён как завершённый; состояние неизвестно. "
+                               "Частичный текст в ошибку не выводится.")
 
 
 # ----------------------------------------------------------------- Manifest
@@ -381,11 +573,58 @@ def build_manifest(p):
 
 
 # ----------------------------------------------------------------- Commands
+def parse_actions(text):
+    """Все директивы ACTION из ответа модели как недоверенные предложения."""
+    return [{"type": m.group(1), "arg": m.group(2).strip()}
+            for m in re.finditer(r"ACTION:\s*([A-Z_]+)\s*[:\-]?\s*(.*)", text)]
+
+
 def parse_action(text):
-    m = list(re.finditer(r"ACTION:\s*([A-Z_]+)\s*[:\-]?\s*(.*)", text))
-    if not m:
+    """Последний ACTION как предложение.
+
+    Ответ веб-модели — недоверенные данные. Разбор ничего не выполняет, не
+    выдаёт разрешений и не связан с устройством/браузером. Поля
+    ``advisory_only``/``executed`` фиксируют это явно; конфликтующие директивы
+    помечаются ``conflict`` и требуют отдельного решения оператора.
+    """
+    actions = parse_actions(text)
+    if not actions:
         return None
-    return {"type": m[-1].group(1), "arg": m[-1].group(2).strip()}
+    result = dict(actions[-1])
+    types = {a["type"] for a in actions}
+    result.update({"advisory_only": True, "executed": False,
+                   "count": len(actions), "conflict": len(types) > 1})
+    if len(actions) > 1:
+        result["all"] = actions
+    return result
+
+
+def _public_action(act, include_arg=False):
+    """ACTION для вывода: без содержимого аргумента, если нет opt-in."""
+    if act is None:
+        return None
+    public = {"type": act["type"], "advisory_only": True, "executed": False,
+              "count": act.get("count", 1), "conflict": bool(act.get("conflict"))}
+    if include_arg:
+        public["arg"] = act.get("arg", "")
+    else:
+        public["arg_chars"] = len(act.get("arg", ""))
+    return public
+
+
+def _utc_now():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _draft_key(p):
+    # Один активный черновик на провайдера: блокируем чат целиком, чтобы
+    # подготовка, вложения, текст, клик и фиксация не пересекались.
+    return f"chat:{p}"
+
+
+def _pending_chats(st):
+    return [p for p in PROVIDERS
+            if isinstance(st.get("chats", {}).get(p), dict) and st["chats"][p].get("pending_send")]
 
 
 def _same_context(st, task_id, p, conversation_id):
@@ -430,84 +669,160 @@ def _check_no_prior_attachments(page, confirmed, editor_selector):
 def cmd_send(a):
     p = a.to or CFG["chats"]["primary"]
     c = provider_cfg(p)
-    text = Path(a.text_file).read_text(encoding="utf-8") if a.text_file else (a.text or "")
-    files = [Path(f) for f in (a.image or [])]
-    st = load_state()
-    task_id = st.get("task_id")
-    conversation_id = st["chats"][p].get("conversation_id")
-    if st["chats"][p].get("pending_send"):
-        raise ChatError("PENDING_SEND", "Предыдущая отправка могла состояться. Сначала проверьте чат; повторная отправка заблокирована")
-    # Old persistent state might contain a previous task's ref. Only a ref
-    # explicitly registered by the current version's task command is eligible.
-    ref_img = st.get("ref_image") if st.get("task_context_valid") else None
-    if ref_img and not st["chats"][p].get("ref_sent"):
-        ref_path = Path(ref_img)
-        if not ref_path.is_file():
-            raise ChatError("NO_FILE", f"Нет файла референса текущей задачи: {ref_path}")
-        if all(f.resolve() != ref_path.resolve() for f in files if f.exists()):
-            files.insert(0, ref_path)
-    for f in files:
-        if not f.exists():
-            raise ChatError("NO_FILE", f"Нет файла {f}")
-    with_manifest = not st["chats"][p].get("manifest_sent") or a.manifest
-    if with_manifest:
-        text = build_manifest(p) + "\n\n---\n\n" + text
-    with Session() as s:
-        if not st["chats"][p].get("prepared_id"):
-            raise ChatError("PREPARE_REQUIRED", "Сначала подготовьте вкладку командой prepare и осмотрите редактор")
-        page = get_page(s, p)
-        status = check_ready(page, c)
-        if status != "OK":
-            raise ChatError(status, f"{c['title']}: {status}. URL: {page.url}")
-        if not _valid_target(page.url, c["host"]):
-            raise ChatError("BAD_CHAT_URL", "После перехода открыт другой сайт; отправка остановлена")
-        inspected_url = st["chats"][p].get("inspected_url")
-        if not inspected_url or page.url != inspected_url:
-            raise ChatError("CHAT_MISMATCH", "Адрес вкладки изменился после осмотра; повторите inspect")
-        expected = st["chats"][p].get("url")
-        if expected and not st["chats"][p].get("new_task_pending") and page.url.rstrip("/") != expected.rstrip("/"):
-            raise ChatError("CHAT_MISMATCH", "Открыт другой чат; отправка остановлена")
-        before = assistant_texts(page, c)[0]
-        editor_selector, _ = _empty_editor(page, c)
-        _check_no_prior_attachments(page, getattr(a, "confirmed_no_prior_attachments", False), editor_selector)
-        method = attach(page, c, files)
-        put_text(page, c, text.strip())
-        # Persist uncertainty BEFORE the click: a crash/timeout cannot silently retry.
-        before_send = {key: st["chats"][p].get(key) for key in ("manifest_sent", "ref_sent", "new_task_pending", "messages")}
-        ref_included = bool(ref_img and any(f.resolve() == Path(ref_img).resolve() for f in files))
-        _update_context(p, task_id, conversation_id, {"pending_send": True, "pending_previous": before_send, "inspected_url": None,
-                        "pending_manifest": with_manifest, "pending_ref": ref_included}, require_no_pending=True)
-        try:
-            click_send(page, c)
-            _update_context(p, task_id, conversation_id, {"pending_send": True, "new_task_pending": False,
-                "manifest_sent": bool(with_manifest or st["chats"][p].get("manifest_sent")),
-                "ref_sent": bool(st["chats"][p].get("ref_sent") or (ref_img and any(f.resolve() == Path(ref_img).resolve() for f in files)))})
-            reply = wait_reply(page, c, before, a.timeout or int(BR.get("reply_timeout_seconds", 600)))
-            url = page.url
-        except Exception:
-            # Keep pending; preserve the selected URL if still on the same task.
+    with draft_lock(_draft_key(p)):
+        text = Path(a.text_file).read_text(encoding="utf-8") if a.text_file else (a.text or "")
+        files = [Path(f) for f in (a.image or [])]
+        st = load_state()
+        task_id = st.get("task_id")
+        conversation_id = st["chats"][p].get("conversation_id")
+        if st["chats"][p].get("pending_send"):
+            raise ChatError("PENDING_SEND", "Предыдущая отправка могла состояться. Сначала проверьте чат; повторная отправка заблокирована")
+        # Old persistent state might contain a previous task's ref. Only a ref
+        # explicitly registered by the current version's task command is eligible.
+        ref_img = st.get("ref_image") if st.get("task_context_valid") else None
+        if ref_img and not st["chats"][p].get("ref_sent"):
+            ref_path = Path(ref_img)
+            if not ref_path.is_file():
+                raise ChatError("NO_FILE", f"Нет файла референса текущей задачи: {ref_path}")
+            if all(f.resolve() != ref_path.resolve() for f in files if f.exists()):
+                files.insert(0, ref_path)
+        for f in files:
+            if not f.exists():
+                raise ChatError("NO_FILE", f"Нет файла {f}")
+        with_manifest = not st["chats"][p].get("manifest_sent") or a.manifest
+        if with_manifest:
+            text = build_manifest(p) + "\n\n---\n\n" + text
+        method = None
+        attempt = None
+        pending_written = False
+        with Session() as s:
+            if not st["chats"][p].get("prepared_id"):
+                raise ChatError("PREPARE_REQUIRED", "Сначала подготовьте вкладку командой prepare и осмотрите редактор")
+            page = get_page(s, p)
+            status = check_ready(page, c)
+            if status != "OK":
+                raise ChatError(status, f"{c['title']}: {status}. URL: {page.url}")
+            if not _valid_target(page.url, c["host"]):
+                raise ChatError("BAD_CHAT_URL", "После перехода открыт другой сайт; отправка остановлена")
+            inspected_url = st["chats"][p].get("inspected_url")
+            if not inspected_url or page.url != inspected_url:
+                raise ChatError("CHAT_MISMATCH", "Адрес вкладки изменился после осмотра; повторите inspect")
+            expected = st["chats"][p].get("url")
+            if expected and not st["chats"][p].get("new_task_pending") and page.url.rstrip("/") != expected.rstrip("/"):
+                raise ChatError("CHAT_MISMATCH", "Открыт другой чат; отправка остановлена")
+            before = assistant_texts(page, c)[0]
+            editor_selector, _ = _empty_editor(page, c)
+            _check_no_prior_attachments(page, getattr(a, "confirmed_no_prior_attachments", False), editor_selector)
+            attempt = {
+                "chat": p,
+                "task_id": task_id,
+                "conversation_id": conversation_id,
+                "prepared_id": st["chats"][p].get("prepared_id"),
+                "inspected_url": st["chats"][p].get("inspected_url"),
+                "at": _utc_now(),
+                "stage": "requested",
+                "stages": ["requested"],
+                "files_requested": len(files),
+                "files": [f.name for f in files],
+                "files_added": 0 if files else 0,
+                "method": None,
+                "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "delivery": "unknown",
+                "generation": GENERATION_UNKNOWN,
+            }
             try:
-                if _valid_target(page.url, c["host"]):
-                    _update_context(p, task_id, conversation_id, {"url": page.url})
-            except ChatError:
-                pass
-            raise
-    changes = {"pending_send": False, "pending_previous": None, "pending_manifest": False, "pending_ref": False, "new_task_pending": False,
-               "messages": int(st["chats"][p].get("messages", 0)) + 1}
-    if _valid_target(url, c["host"]):
-        changes["url"] = url
-    _update_context(p, task_id, conversation_id, changes)
-    n = len(list(log_dir("chats").glob(f"{p}_*.md"))) + 1
-    lp = log_dir("chats") / f"{p}_{n:04d}.md"
-    # Default journal is metadata only. Persist content only on explicit opt-in.
-    if getattr(a, "log_content", False):
-        log = f"# SENT ({method}, files={len(files)})\n\n{text}\n\n# REPLY\n\n{reply}\n"
-    else:
-        log = f"# Chat metadata\nprovider={p}\nattachment_method={method}\nfiles_requested={len(files)}\nattachment_delivery=unverified\ncontent_saved=false\n"
-    lp.write_text(log, encoding="utf-8")
-    act = parse_action(reply)
-    out(f"=== REPLY {p} | manifest={'yes' if with_manifest else 'no'} | attach={method} | files_requested={len(files)} | attachment_delivery=unverified | log={lp} ===\n"
-        f"{reply}\n=== PARSED ACTION: {json.dumps(act, ensure_ascii=False)} ===")
+                method = attach(page, c, files)
+                stage = "attachments_added" if files else "no_attachments"
+                attempt.update({"stage": stage, "method": method,
+                                "files_added": len(files) if files else 0})
+                attempt["stages"].append(stage)
+                put_text(page, c, text.strip())
+                attempt.update({"stage": "text_ready"})
+                attempt["stages"].append("text_ready")
+                # Persist uncertainty BEFORE the click: a crash/timeout cannot silently retry.
+                before_send = {key: st["chats"][p].get(key) for key in ("manifest_sent", "ref_sent", "new_task_pending", "messages")}
+                ref_included = bool(ref_img and any(f.resolve() == Path(ref_img).resolve() for f in files))
+                attempt.update({"stage": "send_started"})
+                attempt["stages"].append("send_started")
+                _update_context(p, task_id, conversation_id, {"pending_send": True, "pending_previous": before_send,
+                                "pending_context": attempt, "inspected_url": None,
+                                "pending_manifest": with_manifest, "pending_ref": ref_included}, require_no_pending=True)
+                pending_written = True
+                click_send(page, c)
+                attempt.update({"stage": "sent_unknown", "delivery": "unknown",
+                                "generation": GENERATION_UNKNOWN})
+                attempt["stages"].append("sent_unknown")
+                _update_context(p, task_id, conversation_id, {"pending_send": True, "pending_context": attempt,
+                    "new_task_pending": False,
+                    "manifest_sent": bool(with_manifest or st["chats"][p].get("manifest_sent")),
+                    "ref_sent": bool(st["chats"][p].get("ref_sent") or (ref_img and any(f.resolve() == Path(ref_img).resolve() for f in files)))})
+                reply = wait_reply(page, c, before, a.timeout or int(BR.get("reply_timeout_seconds", 600)))
+                generation = getattr(reply, "generation", GENERATION_UNKNOWN)
+                url = page.url
+            except Exception:
+                if pending_written:
+                    # Click could have happened (or the outcome is still unknown):
+                    # keep pending and record the uncertain stage, never "not sent".
+                    try:
+                        attempt.update({"stage": "sent_unknown", "delivery": "unknown",
+                                        "generation": GENERATION_UNKNOWN})
+                        if attempt["stages"][-1] != "sent_unknown":
+                            attempt["stages"].append("sent_unknown")
+                        _update_context(p, task_id, conversation_id, {"pending_send": True, "pending_context": attempt})
+                    except ChatError:
+                        pass
+                elif attempt is not None:
+                    try:
+                        if attempt["stage"] == "requested":
+                            failed_stage = "add_failed"
+                        elif attempt["stage"] in ("attachments_added", "no_attachments"):
+                            failed_stage = "text_failed"
+                        else:
+                            failed_stage = "pre_send_failed"
+                        attempt.update({"stage": failed_stage, "delivery": "not_sent"})
+                        attempt["stages"].append(failed_stage)
+                        _update_context(p, task_id, conversation_id, {"last_attachment": attempt})
+                    except ChatError:
+                        pass
+                # Keep pending; preserve the selected URL if still on the same task.
+                try:
+                    if _valid_target(page.url, c["host"]):
+                        _update_context(p, task_id, conversation_id, {"url": page.url})
+                except ChatError:
+                    pass
+                raise
+        changes = {"pending_send": False, "pending_previous": None, "pending_context": None,
+                   "pending_manifest": False, "pending_ref": False, "new_task_pending": False,
+                   "messages": int(st["chats"][p].get("messages", 0)) + 1,
+                   "last_attachment": dict(attempt, stage="reply_received", delivery="unverified",
+                                           generation=generation,
+                                           stages=attempt["stages"] + ["reply_received"])}
+        if _valid_target(url, c["host"]):
+            changes["url"] = url
+        _update_context(p, task_id, conversation_id, changes)
+        # Журнал по умолчанию — только метаданные. Содержимое сохраняется
+        # исключительно при явном --log-content. Имя уникально и создаётся
+        # атомарно: параллельные отправки не перезаписывают чужие журналы.
+        if getattr(a, "log_content", False):
+            log = (f"# SENT ({method}, files={len(files)})\n\n{text}\n\n# REPLY ({generation})\n\n{reply}\n")
+        else:
+            log = (f"# Chat metadata\nprovider={p}\nattachment_method={method}\n"
+                   f"files_requested={len(files)}\nattachment_delivery=unverified\n"
+                   f"generation={generation}\ncontent_saved=false\n")
+        lp = create_unique_file(log_dir("chats"), p, ".md", log)
+        act = parse_action(reply)
+        show_content = bool(getattr(a, "show_content", False))
+        summary = (f"=== REPLY {p} | manifest={'yes' if with_manifest else 'no'} | attach={method} | "
+                   f"files_requested={len(files)} | attachment_delivery=unverified | "
+                   f"generation={generation} | log={lp} ===\n"
+                   f"reply_chars={len(reply)} reply_sha256={hashlib.sha256(str(reply).encode('utf-8')).hexdigest()}")
+        if show_content:
+            summary += f"\n{reply}"
+        else:
+            summary += "\n[содержимое ответа не выводится; используйте --show-content]"
+        summary += f"\n=== PARSED ACTION (advisory only; not executed): " \
+                   f"{json.dumps(_public_action(act, include_arg=show_content), ensure_ascii=False)} ==="
+        out(summary)
 
 
 def cmd_read(a):
@@ -516,95 +831,123 @@ def cmd_read(a):
     with Session() as s:
         page = get_page(s, p)
         txt = last_reply_text(page, c)
-        gen = is_generating(page, c)
-    out(f"=== LAST REPLY {p} | generating={gen} ===\n{txt}\n=== PARSED ACTION: "
-        f"{json.dumps(parse_action(txt), ensure_ascii=False)} ===")
+        state = generation_state(page, c)
+    act = parse_action(txt)
+    show_content = bool(getattr(a, "show_content", False))
+    generating = {GENERATION_GENERATING: True, GENERATION_FINISHED: False}.get(state, "unknown")
+    lines = [f"=== LAST REPLY {p} | generating={generating} | generation={state} | chars={len(txt)} ==="]
+    if state == GENERATION_UNKNOWN:
+        lines.append("Состояние генерации неизвестно; ответ может быть неполным.")
+    if show_content:
+        lines.append(txt)
+    else:
+        lines.append("[содержимое ответа не выводится; используйте --show-content]")
+    lines.append("=== PARSED ACTION (advisory only; not executed): "
+                 f"{json.dumps(_public_action(act, include_arg=show_content), ensure_ascii=False)} ===")
+    out("\n".join(lines))
 
 
 def cmd_new(a):
     p = a.to
     c = provider_cfg(p)
-    before = load_state()
-    if before["chats"][p].get("pending_send"):
-        raise ChatError("PENDING_SEND", "Сначала проверьте предыдущую отправку и разрешите её состояние")
-    task_id, conv_id = before.get("task_id"), before["chats"][p].get("conversation_id")
-    marker = "pdd-operator-" + uuid.uuid4().hex
-    with Session() as s:
-        page = s.ctx.new_page()
-        page.goto(c["url"], wait_until="domcontentloaded", timeout=60000)
-        status = check_ready(page, c)
-        if status != "OK" or not _valid_target(page.url, c["host"]):
-            raise ChatError(status if status != "OK" else "BAD_CHAT_URL", "Не удалось подготовить вкладку чата")
-        page.evaluate("name => { window.name = name; }", marker)
-    _update_context(p, task_id, conv_id, {"url": None, "manifest_sent": False, "ref_sent": False, "messages": 0,
-                    "new_task_pending": True, "prepared_id": marker, "inspected_url": None,
-                    "conversation_id": uuid.uuid4().hex}, require_no_pending=True)
-    out({"ok": True, "status": status, "chat": p, "note": "Создана отдельная вкладка; осмотрите её перед отправкой."})
+    with draft_lock(_draft_key(p)):
+        before = load_state()
+        if before["chats"][p].get("pending_send"):
+            raise ChatError("PENDING_SEND", "Сначала проверьте предыдущую отправку и разрешите её состояние")
+        task_id, conv_id = before.get("task_id"), before["chats"][p].get("conversation_id")
+        marker = "pdd-operator-" + uuid.uuid4().hex
+        with Session() as s:
+            page = s.ctx.new_page()
+            page.goto(c["url"], wait_until="domcontentloaded", timeout=60000)
+            status = check_ready(page, c)
+            if status != "OK" or not _valid_target(page.url, c["host"]):
+                raise ChatError(status if status != "OK" else "BAD_CHAT_URL", "Не удалось подготовить вкладку чата")
+            page.evaluate("name => { window.name = name; }", marker)
+        _update_context(p, task_id, conv_id, {"url": None, "manifest_sent": False, "ref_sent": False, "messages": 0,
+                        "new_task_pending": True, "prepared_id": marker, "inspected_url": None,
+                        "conversation_id": uuid.uuid4().hex}, require_no_pending=True)
+        out({"ok": True, "status": status, "chat": p, "note": "Создана отдельная вкладка; осмотрите её перед отправкой."})
 
 
 def cmd_prepare(a):
-    st = load_state()
     p = a.to
-    if st["chats"][p].get("pending_send"):
-        raise ChatError("PENDING_SEND", "Сначала проверьте предыдущую отправку и разрешите её состояние")
-    if st["chats"][p].get("new_task_pending"):
-        cmd_new(a)
-        return
-    c = provider_cfg(p)
-    task_id, conv_id = st.get("task_id"), st["chats"][p].get("conversation_id")
-    marker = "pdd-operator-" + uuid.uuid4().hex
-    with Session() as s:
-        page = get_page(s, p)
-        status = check_ready(page, c)
-        if status != "OK" or not _valid_target(page.url, c["host"]):
-            raise ChatError(status if status != "OK" else "BAD_CHAT_URL", "Не удалось подготовить вкладку чата")
-        page.evaluate("name => { window.name = name; }", marker)
-    _update_context(p, task_id, conv_id, {"prepared_id": marker, "inspected_url": None}, require_no_pending=True)
-    out({"ok": True, "chat": p, "note": "Вкладка подготовлена; осмотрите её перед отправкой."})
+    with draft_lock(_draft_key(p)):
+        st = load_state()
+        if st["chats"][p].get("pending_send"):
+            raise ChatError("PENDING_SEND", "Сначала проверьте предыдущую отправку и разрешите её состояние")
+        if st["chats"][p].get("new_task_pending"):
+            cmd_new(a)
+            return
+        c = provider_cfg(p)
+        task_id, conv_id = st.get("task_id"), st["chats"][p].get("conversation_id")
+        marker = "pdd-operator-" + uuid.uuid4().hex
+        with Session() as s:
+            page = get_page(s, p)
+            status = check_ready(page, c)
+            if status != "OK" or not _valid_target(page.url, c["host"]):
+                raise ChatError(status if status != "OK" else "BAD_CHAT_URL", "Не удалось подготовить вкладку чата")
+            page.evaluate("name => { window.name = name; }", marker)
+        _update_context(p, task_id, conv_id, {"prepared_id": marker, "inspected_url": None}, require_no_pending=True)
+        out({"ok": True, "chat": p, "note": "Вкладка подготовлена; осмотрите её перед отправкой."})
 
 
 def cmd_resolve(a):
     if not (a.reviewed_sent or a.reviewed_not_sent):
         raise ChatError("REVIEW_REQUIRED", "После проверки укажите --reviewed-sent либо --reviewed-not-sent")
     p = a.to
-    def mutate(st):
-        if not st["chats"][p].get("pending_send"):
-            raise ChatError("NO_PENDING_SEND", "Ожидающей отправки нет")
-        ch = st["chats"][p]
-        previous = ch.get("pending_previous")
-        if not isinstance(previous, dict):
-            raise ChatError("PENDING_METADATA_MISSING", "Не хватает состояния попытки; начните новую задачу после проверки")
-        if a.reviewed_sent:
-            ch.update({"manifest_sent": bool(previous.get("manifest_sent") or ch.get("pending_manifest")),
-                       "ref_sent": bool(previous.get("ref_sent") or ch.get("pending_ref")),
-                       "new_task_pending": False, "messages": int(previous.get("messages") or 0) + 1})
-        else:
-            ch.update(previous)
-        ch.update({"pending_send": False, "pending_previous": None, "pending_manifest": False, "pending_ref": False})
-    update_state(mutate)
-    out({"ok": True, "chat": p, "note": "Блокировка снята после проверки; автоматический повтор не выполнялся."})
+    with draft_lock(_draft_key(p)):
+        def mutate(st):
+            if not st["chats"][p].get("pending_send"):
+                raise ChatError("NO_PENDING_SEND", "Ожидающей отправки нет")
+            ch = st["chats"][p]
+            previous = ch.get("pending_previous")
+            if not isinstance(previous, dict):
+                raise ChatError("PENDING_METADATA_MISSING", "Не хватает состояния попытки; начните новую задачу после проверки")
+            if a.reviewed_sent:
+                ch.update({"manifest_sent": bool(previous.get("manifest_sent") or ch.get("pending_manifest")),
+                           "ref_sent": bool(previous.get("ref_sent") or ch.get("pending_ref")),
+                           "new_task_pending": False, "messages": int(previous.get("messages") or 0) + 1})
+            else:
+                ch.update(previous)
+            context = ch.get("pending_context")
+            if isinstance(context, dict):
+                reviewed = dict(context)
+                reviewed["stage"] = "operator_reviewed_sent" if a.reviewed_sent else "operator_reviewed_not_sent"
+                reviewed["delivery"] = "unknown" if a.reviewed_sent else "not_sent"
+                reviewed["stages"] = list(context.get("stages") or []) + [reviewed["stage"]]
+                ch["last_attachment"] = reviewed
+            ch.update({"pending_send": False, "pending_previous": None, "pending_context": None,
+                       "pending_manifest": False, "pending_ref": False})
+        update_state(mutate)
+        out({"ok": True, "chat": p, "note": "Блокировка снята после проверки; автоматический повтор не выполнялся."})
 
 
 def cmd_set_url(a):
     p = a.to
     c = provider_cfg(p)
-    st = load_state()
-    if st["chats"][p].get("pending_send"):
-        raise ChatError("PENDING_SEND", "Сначала проверьте предыдущую отправку и разрешите её состояние")
-    task_id, conv_id = st.get("task_id"), st["chats"][p].get("conversation_id")
-    with Session() as s:
-        page = get_page(s, p, url=a.url)
-        status = check_ready(page, c)
-    known = a.url in st["manifest_urls"]
-    _update_context(p, task_id, conv_id, {"url": a.url, "manifest_sent": known, "new_task_pending": False,
-                    "prepared_id": None, "inspected_url": None, "conversation_id": uuid.uuid4().hex}, require_no_pending=True)
-    out({"ok": status == "OK", "status": status, "chat": p, "manifest_already_sent": known})
+    with draft_lock(_draft_key(p)):
+        st = load_state()
+        if st["chats"][p].get("pending_send"):
+            raise ChatError("PENDING_SEND", "Сначала проверьте предыдущую отправку и разрешите её состояние")
+        task_id, conv_id = st.get("task_id"), st["chats"][p].get("conversation_id")
+        with Session() as s:
+            page = get_page(s, p, url=a.url)
+            status = check_ready(page, c)
+        known = a.url in st["manifest_urls"]
+        _update_context(p, task_id, conv_id, {"url": a.url, "manifest_sent": known, "new_task_pending": False,
+                        "prepared_id": None, "inspected_url": None, "conversation_id": uuid.uuid4().hex}, require_no_pending=True)
+        out({"ok": status == "OK", "status": status, "chat": p, "manifest_already_sent": known})
 
 
 def cmd_primary(a):
     provider_cfg(a.provider)
-    CFG["chats"]["primary"] = a.provider
-    save_config(CFG)
+
+    def change(cfg):
+        cfg.setdefault("chats", {})["primary"] = a.provider
+        return cfg
+
+    updated = update_config(change)
+    CFG["chats"]["primary"] = updated["chats"]["primary"]
     out({"ok": True, "primary": a.provider})
 
 
@@ -626,33 +969,79 @@ def cmd_task(a):
         if not rp.exists():
             raise ChatError("NO_FILE", f"Нет файла референса {rp}")
         ref = str(rp)
-    def mutate(st):
-        st["task"] = task_text.strip()
-        st["task_id"] = uuid.uuid4().hex
-        st["task_context_valid"] = True
-        st["ref_image"] = ref
-        for p in PROVIDERS:
-            if p in st.get("chats", {}):
-                st["chats"][p].update({"url": None, "manifest_sent": False, "ref_sent": False, "messages": 0,
-                                       "new_task_pending": True, "prepared_id": None, "inspected_url": None, "pending_send": False,
-                                       "conversation_id": uuid.uuid4().hex})
-    update_state(mutate)
-    out({"ok": True, "task": task_text.strip(), "ref_image": ref, "note": "Следующая отправка начнёт новую беседу и получит контекст текущей задачи."})
+    with ExitStack() as stack:
+        for p in sorted(PROVIDERS):
+            stack.enter_context(draft_lock(_draft_key(p)))
+
+        def mutate(st):
+            pending = _pending_chats(st)
+            if pending:
+                raise ChatError(
+                    "PENDING_SEND",
+                    "Есть неразрешённая отправка в чате(ах) "
+                    f"{', '.join(pending)}; новая задача не создана. Сначала проверьте чат и выполните resolve.")
+            st["task"] = task_text.strip()
+            st["task_id"] = uuid.uuid4().hex
+            st["task_context_valid"] = True
+            st["ref_image"] = ref
+            for p in PROVIDERS:
+                if p in st.get("chats", {}):
+                    st["chats"][p].update({"url": None, "manifest_sent": False, "ref_sent": False, "messages": 0,
+                                           "new_task_pending": True, "prepared_id": None, "inspected_url": None,
+                                           "pending_send": False, "pending_previous": None, "pending_context": None,
+                                           "pending_manifest": False, "pending_ref": False, "last_attachment": None,
+                                           "conversation_id": uuid.uuid4().hex})
+        update_state(mutate)
+    # Текст задачи хранится в state.json и уходит Стратегу, но не выводится в
+    # stdout по умолчанию: он может содержать личные данные. В выводе только
+    # метаданные; сам текст доступен в локальном state.json.
+    out({"ok": True, "task_chars": len(task_text.strip()),
+         "task_sha256": hashlib.sha256(task_text.strip().encode("utf-8")).hexdigest(),
+         "content_echoed": False, "ref_image": ref,
+         "note": "Следующая отправка начнёт новую беседу и получит контекст текущей задачи."})
 
 
 def cmd_status(a):
     st = load_state()
-    res = {"browser": cdp_alive(), "port": PORT, "primary": CFG["chats"]["primary"], "task": st.get("task"), "chats": {}}
+    probe = cdp_probe()
+    task_text = st.get("task") or ""
+    res = {"browser": probe["verified"], "port": PORT, "cdp": probe,
+           "primary": CFG["chats"]["primary"],
+           "task_chars": len(task_text),
+           "task_sha256": hashlib.sha256(task_text.encode("utf-8")).hexdigest() if task_text else None,
+           "task_context_valid": bool(st.get("task_context_valid")),
+           "chats": {}}
+    for p in PROVIDERS:
+        ch = st["chats"][p]
+        if ch.get("pending_send"):
+            res["chats"][p] = {"pending_send": True, "pending_context": ch.get("pending_context")}
     if res["browser"]:
-        with Session() as s:
+        # Статус пассивен: только существующие контексты/вкладки, без
+        # new_context/new_page/goto. Отсутствие вкладки — явный статус, не повод
+        # её открыть.
+        session = Session()
+        # Флаг ставится до __enter__ и не требует аргументов конструктора:
+        # статус не должен создавать новый контекст даже в вырожденном случае.
+        session.create_context = False
+        with session as s:
             for p in PROVIDERS:
                 c = CFG["chats"][p]
                 try:
-                    page = get_page(s, p)
-                    res["chats"][p] = {"status": check_ready(page, c, wait_ms=20000), "url": page.url,
-                                       "manifest_sent": st["chats"][p].get("manifest_sent")}
+                    page = get_page(s, p, create=False)
+                    if page is None:
+                        res["chats"].setdefault(p, {}).update(
+                            {"status": "NOT_OPEN", "url": None,
+                             "manifest_sent": st["chats"][p].get("manifest_sent"),
+                             "note": "Вкладка не открыта; статус не создаёт вкладок."})
+                        continue
+                    res["chats"].setdefault(p, {}).update(
+                        {"status": check_ready(page, c, wait_ms=20000), "url": page.url,
+                         "manifest_sent": st["chats"][p].get("manifest_sent")})
                 except Exception as e:
-                    res["chats"][p] = {"status": "ERROR", "error": str(e)[:300]}
+                    res["chats"].setdefault(p, {}).update({"status": "ERROR", "error": str(e)[:300]})
+    elif probe["reachable"]:
+        res["hint"] = (f"Порт {PORT} занят, но CDP не подтвердил наш Chrome/профиль "
+                       f"({probe['reason']}); работа с чатами остановлена.")
     else:
         res["hint"] = "Запустите фоновую задачу: python chat.py browser"
     out(res)
@@ -710,9 +1099,11 @@ def main():
     p = sp.add_parser("send"); p.add_argument("--to", choices=PROVIDERS); p.add_argument("--text-file")
     p.add_argument("--text"); p.add_argument("--image", action="append"); p.add_argument("--timeout", type=int)
     p.add_argument("--manifest", action="store_true", help="принудительно приложить манифест")
-    p.add_argument("--log-content", action="store_true", help="явно сохранить полный текст сообщения и ответа в локальный журнал")
+    p.add_argument("--log-content", action="store_true", help="явно сохранить полный текст сообщения (включая задачу/манифест) и ответа в локальный журнал; журнал может содержать личные данные")
+    p.add_argument("--show-content", action="store_true", help="явно вывести текст ответа в stdout; по умолчанию выводятся только метаданные")
     p.add_argument("--confirmed-no-prior-attachments", action="store_true", help="только после осмотра текущей вкладки: в редакторе нет чужих вложений")
     p = sp.add_parser("read"); p.add_argument("--to", choices=PROVIDERS)
+    p.add_argument("--show-content", action="store_true", help="явно вывести текст последнего ответа в stdout; по умолчанию только метаданные")
     p = sp.add_parser("new"); p.add_argument("--to", choices=PROVIDERS, required=True)
     p = sp.add_parser("prepare"); p.add_argument("--to", choices=PROVIDERS, required=True)
     p = sp.add_parser("resolve"); p.add_argument("--to", choices=PROVIDERS, required=True)

@@ -2,7 +2,12 @@
 """Offline arithmetic only: compare explicitly supplied Pinduoduo offer costs.
 
 No browsing, device control, quality scoring, account writes, or purchases.
-All candidate prices cover the stated quantity, not a single unit.
+All candidate prices cover the stated quantity, not a single unit. ``goods``
+must already be the price after confirmed discounts; a conditional discount is
+not subtracted here until its terms are confirmed by the agent. The default
+comparison boundary is ``china`` (goods + seller delivery to the saved Chinese
+warehouse + known payment fees), matching the buyer rules; use ``landed`` only
+when the user explicitly asks for the full cost to the final recipient.
 """
 from __future__ import annotations
 
@@ -58,8 +63,11 @@ def read_component(value: Any, label: str) -> tuple[Decimal | None, str]:
     return number, certainty
 
 
-def compare(data: Any, basis: str = 'landed') -> dict[str, Any]:
-    """Validate data and return totals; never infer unknown costs as zero."""
+def compare(data: Any, basis: str = 'china') -> dict[str, Any]:
+    """Validate data and return totals; never infer unknown costs as zero.
+
+    ``china`` is the safe default from the rules. ``landed`` is explicit-only.
+    """
     if basis not in BASES:
         raise ValueError('basis must be china or landed')
     if not isinstance(data, dict) or not isinstance(data.get('candidates'), list):
@@ -152,7 +160,8 @@ def compare(data: Any, basis: str = 'landed') -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('input', type=Path, help='UTF-8 JSON with candidates and optional reference_id')
-    parser.add_argument('--basis', choices=tuple(BASES), default='landed')
+    parser.add_argument('--basis', choices=tuple(BASES), default='china',
+                        help='china (default) = goods + CN delivery + payment; landed only on explicit request')
     args = parser.parse_args()
     try:
         data = json.loads(args.input.read_text(encoding='utf-8'), parse_float=Decimal)

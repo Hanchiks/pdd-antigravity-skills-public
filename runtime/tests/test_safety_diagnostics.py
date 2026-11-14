@@ -1,3 +1,8 @@
+"""Категория (б): офлайн-заглушки, а не устройство.
+
+ADB/DOM/UI подменены моками; зелёный прогон не подтверждает поведение на
+реальном телефоне или в браузере.
+"""
 import types
 import unittest
 from unittest.mock import patch
@@ -48,18 +53,24 @@ class SafetyDiagnosticTests(unittest.TestCase):
                 pdd.cmd_tapel(types.SimpleNamespace(indices=[0], long=0))
             self.assertNotIn(sensitive, str(err.exception))
 
-    def test_dump_explains_close_and_persistent_idle_without_leaking_output(self):
+    def test_dump_is_passive_and_points_to_explicit_close_command(self):
+        # Старый тест ожидал автозакрытие плеера из dump_ui_xml. Это было
+        # неверное ожидание: чтение не должно нажимать на экран. Теперь ошибка
+        # честно сообщает об отсутствии действий и ссылается на close-player.
         output = "ERROR: could not get idle state. частные-данные"
-        for closed, detail in ((True, "попытка закрыть распознанный мини-плеер"),
-                               (False, "не был автоматически закрыт")):
-            attempts = [(None, output, True)] * (3 if closed else 2)
-            with self.subTest(closed=closed), patch.object(pdd, "_dump_ui_attempts", side_effect=attempts), \
-                 patch.object(pdd, "_close_live_player_after_failed_dump", return_value=closed):
-                with self.assertRaises(pdd.AdbError) as err:
-                    pdd.dump_ui_xml()
-                self.assertIn(detail, str(err.exception))
-                self.assertIn("could not get idle state", str(err.exception))
-                self.assertNotIn("частные-данные", str(err.exception))
+        with patch.object(pdd, "_dump_ui_attempts", return_value=(None, output, True)), \
+             patch.object(pdd, "tap_real") as tap, \
+             patch.object(pdd, "run_adb") as adb:
+            with self.assertRaises(pdd.AdbError) as err:
+                pdd.dump_ui_xml()
+            tap.assert_not_called()
+            adb.assert_not_called()
+        text = str(err.exception)
+        self.assertIn("автоматических действий", text)
+        self.assertIn("close-player", text)
+        self.assertNotIn("Выполнена попытка", text)
+        self.assertIn("could not get idle state", text)
+        self.assertNotIn("частные-данные", text)
 
 
 if __name__ == "__main__":

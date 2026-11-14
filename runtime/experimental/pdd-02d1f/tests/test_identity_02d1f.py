@@ -32,6 +32,11 @@ def tree(*, rid="search_input", bounds="[90,150][900,240]", extra=""):
 
 
 class SerialIdentityTests(unittest.TestCase):
+    def setUp(self):
+        screen = patch.object(pdd, "screen_info", return_value=SC)
+        screen.start()
+        self.addCleanup(screen.stop)
+
     def test_multiple_devices_without_pinned_serial_is_rejected(self):
         with patch.object(pdd, "PH", {**pdd.PH, "serial": ""}), \
              patch.object(pdd, "list_devices", return_value=[("FAKE-A", "device"), ("FAKE-B", "device")]):
@@ -78,6 +83,11 @@ class SerialIdentityTests(unittest.TestCase):
 
 
 class FocusIdentityTests(unittest.TestCase):
+    def setUp(self):
+        screen = patch.object(pdd, "screen_info", return_value=SC)
+        screen.start()
+        self.addCleanup(screen.stop)
+
     def test_focus_identity_includes_vertical_bounds(self):
         first = tree(bounds="[90,150][900,240]")
         moved = tree(bounds="[90,1500][900,1590]")
@@ -90,6 +100,7 @@ class FocusIdentityTests(unittest.TestCase):
 
     def test_force_cannot_override_focus_identity(self):
         with patch.object(pdd, "ensure_device"), \
+             patch.object(pdd, "SERIAL", "FAKE-A"), \
              patch.object(pdd, "_require_pdd_focus", side_effect=pdd.AdbError("не Pinduoduo")), \
              patch.object(pdd, "read_ui_elements", return_value=[]), \
              patch.object(pdd, "tap_real") as tap:

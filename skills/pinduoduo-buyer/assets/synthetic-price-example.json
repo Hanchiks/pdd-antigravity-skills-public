@@ -1,0 +1,97 @@
+{
+  "notice": "SYNTHETIC EXAMPLE ONLY. Not a real Pinduoduo listing, price, seller, discount or delivery quote. All identifiers and amounts are invented to demonstrate compare_prices.py.",
+  "synthetic": true,
+  "reference_id": "SYN-A",
+  "candidates": [
+    {
+      "id": "SYN-A",
+      "comparison_group": "synthetic-same-use-one-item",
+      "quantity": 1,
+      "currency": "CNY",
+      "gate": "eligible",
+      "available": true,
+      "costs": {
+        "goods": {
+          "amount": 60,
+          "certainty": "observed",
+          "source": "synthetic example, not a real listing"
+        },
+        "delivery_cn": {
+          "amount": 5,
+          "certainty": "provided",
+          "source": "synthetic example, not a real quote"
+        },
+        "inspection": {
+          "amount": 0,
+          "certainty": "not_applicable",
+          "source": "synthetic example"
+        },
+        "delivery_intl": {
+          "amount": null,
+          "certainty": "unknown",
+          "source": "synthetic example: international leg intentionally unknown"
+        },
+        "duties": {
+          "amount": 0,
+          "certainty": "not_applicable",
+          "source": "synthetic example"
+        },
+        "payment": {
+          "amount": 0.5,
+          "certainty": "estimated",
+          "source": "synthetic example, not a real fee"
+        },
+        "other": {
+          "amount": 0,
+          "certainty": "not_applicable",
+          "source": "synthetic example"
+        }
+      }
+    },
+    {
+      "id": "SYN-B",
+      "comparison_group": "synthetic-same-use-one-item",
+      "quantity": 1,
+      "currency": "CNY",
+      "gate": "eligible",
+      "available": true,
+      "costs": {
+        "goods": {
+          "amount": 48,
+          "certainty": "observed",
+          "source": "synthetic example, not a real listing"
+        },
+        "delivery_cn": {
+          "amount": 8,
+          "certainty": "provided",
+          "source": "synthetic example, not a real quote"
+        },
+        "inspection": {
+          "amount": 0,
+          "certainty": "not_applicable",
+          "source": "synthetic example"
+        },
+        "delivery_intl": {
+          "amount": null,
+          "certainty": "unknown",
+          "source": "synthetic example: international leg intentionally unknown"
+        },
+        "duties": {
+          "amount": 0,
+          "certainty": "not_applicable",
+          "source": "synthetic example"
+        },
+        "payment": {
+          "amount": 0.5,
+          "certainty": "estimated",
+          "source": "synthetic example, not a real fee"
+        },
+        "other": {
+          "amount": 0,
+          "certainty": "not_applicable",
+          "source": "synthetic example"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+# Offline test dependencies only. Intentionally excludes playwright: the
+# tests mock all browser/CDP behaviour, so CI must not install playwright or
+# run "playwright install" (which downloads browser binaries).
+Pillow==10.2.0
+PyYAML==6.0.1
