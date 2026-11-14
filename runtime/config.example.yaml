@@ -1,0 +1,51 @@
+phone:
+  serial: ''
+  adb_path: adb
+  package: com.xunmeng.pinduoduo
+  view_width: 720
+  send_width: 1080
+  pace_seconds:
+  - 1.0
+  - 2.0
+profile_path: profile
+browser:
+  chrome_path: ''
+  cdp_port: 9333
+  mode: headless
+  reply_timeout_seconds: 600
+  stable_seconds: 4
+chats:
+  primary: gemini
+  gemini:
+    title: Google AI Pro (Gemini Web)
+    host: gemini.google.com
+    url: https://gemini.google.com/app
+    editor: rich-textarea .ql-editor, div.ql-editor[contenteditable='true']
+    send: button.send-button, button[aria-label*='Send' i], button[aria-label*='Отправ']
+    stop: button.send-button.stop, button[aria-label*='Stop' i], button[aria-label*='Останов']
+    assistant: model-response
+    assistant_text: message-content
+    file_input: input[type='file']
+    upload_clicks:
+    - button[aria-label*='upload' i], button[aria-label*='загруз' i], button.upload-card-button
+    - '[data-test-id=''local-images-files-uploader-button''], button[aria-label*=''Upload
+      files'' i], button[aria-label*=''Загрузить файлы'' i]'
+    attach_methods:
+    - paste
+    - input
+    - chooser
+  chatgpt:
+    title: ChatGPT Business (Web)
+    host: chatgpt.com
+    url: https://chatgpt.com/
+    editor: '#prompt-textarea'
+    send: button[data-testid='send-button'], button#composer-submit-button
+    stop: button[data-testid='stop-button']
+    assistant: '[data-message-author-role=''assistant'']'
+    assistant_text: .markdown
+    file_input: input[type='file']
+    upload_clicks: []
+    attach_methods:
+    - input
+    - paste
+    - chooser

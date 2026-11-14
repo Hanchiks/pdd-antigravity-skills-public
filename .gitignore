@@ -27,3 +27,11 @@ latest.txt
 __pycache__/
 *.py[cod]
 .venv/
+
+# Runtime configuration and locally generated state
+runtime/config.yaml
+runtime/state.json
+runtime/state.json.lock
+runtime/.pdd-state-*.tmp
+outputs/
+runtime/tools/ADBKeyboard.apk
