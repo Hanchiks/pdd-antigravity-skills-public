@@ -1,3 +1,11 @@
-Pillow
-PyYAML
-playwright
+# Runtime dependencies. Pillow and PyYAML below were installed and imported
+# in a clean virtual environment on Linux with Python 3.12.3. The playwright
+# pin was checked against PyPI; playwright itself and a live browser were
+# not run in this environment.
+#
+# Pillow and PyYAML are used by pdd.py/common.py and by the offline tests.
+# playwright is needed only by chat.py for live browser/CDP control; the test
+# suite mocks the browser and does not import playwright.
+Pillow==10.2.0
+PyYAML==6.0.1
+playwright==1.65.2

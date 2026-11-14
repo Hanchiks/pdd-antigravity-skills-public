@@ -21,6 +21,7 @@ import hashlib
 import io
 import json
 import math
+import os
 import random
 import re
 import subprocess
@@ -33,12 +34,14 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from common import ROOT, StateError, load_config, load_state, log_dir, out, save_config, update_state
+from common import (ROOT, StateError, device_lock, load_config, load_state, log_dir, out,
+                    update_config, update_state)
 
 CFG = load_config()
 PH = CFG["phone"]
 SERIAL = None
-ADBKEYBOARD_IME = "com.android.adbkeyboard/.AdbIME"
+ADBKEYBOARD_PACKAGE = "com.android.adbkeyboard"
+ADBKEYBOARD_IME = ADBKEYBOARD_PACKAGE + "/.AdbIME"
 ADBKEYBOARD_URL = "https://github.com/senzhk/ADBKeyBoard/raw/master/ADBKeyboard.apk"
 ADBKEYBOARD_SHA256 = "e698adea5633135a067b038f9a0cf41baa4de09888713a81593fb2b9682cdc59"
 
@@ -52,7 +55,16 @@ class UiIdleError(AdbError):
 
 
 # ----------------------------------------------------------------- ADB basics
-def run_adb(args, use_serial=True, binary=False, timeout=40, check=True, include_stderr=False):
+def run_adb(args, use_serial=True, binary=False, timeout=40, check=True, include_stderr=False,
+            sensitive=False, redact=()):
+    """Запуск adb.
+
+    ``sensitive`` скрывает всю командную строку в сообщении о таймауте.
+    ``redact`` заменяет перечисленные значения (текст, код сопряжения, base64)
+    на ``***`` в сообщении об ошибке, если adb успел вернуть ненулевой код.
+    Это снижает риск утечки, но не скрывает argv от ОС, adb-сервера и журналов
+    устройства: они остаются вне контроля этого процесса.
+    """
     cmd = [PH.get("adb_path") or "adb"]
     if use_serial and SERIAL:
         cmd += ["-s", SERIAL]
@@ -60,9 +72,17 @@ def run_adb(args, use_serial=True, binary=False, timeout=40, check=True, include
     try:
         r = subprocess.run(cmd, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        raise AdbError(f"Таймаут команды: {' '.join(cmd)}")
+        if sensitive:
+            raise AdbError("Таймаут команды: аргументы скрыты, так как могут содержать секрет")
+        shown = " ".join(
+            "[скрыто]" if any(secret and str(arg) == str(secret) for secret in redact) else str(arg)
+            for arg in cmd)
+        raise AdbError(f"Таймаут команды: {shown}")
     if check and r.returncode != 0:
         msg = (r.stderr or r.stdout).decode("utf-8", errors="replace").strip()
+        for secret in redact:
+            if secret:
+                msg = msg.replace(str(secret), "***")
         if "INJECT_EVENTS" in msg:
             msg += ("\nПОДСКАЗКА: на Xiaomi/Redmi/POCO включите «Отладка по USB (настройки безопасности)» "
                     "в «Для разработчиков», иначе тапы запрещены.")
@@ -133,21 +153,66 @@ def pace():
     time.sleep(random.uniform(a, b))
 
 
+def _parse_wm_size(txt):
+    m = re.search(r"Override size:\s*(\d+)x(\d+)", txt) or re.search(r"Physical size:\s*(\d+)x(\d+)", txt)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
 def screen_info(refresh=False):
     st = load_state()
     sc = st.get("screen") or {}
     if sc.get("serial") == SERIAL and sc.get("real_w") and not refresh:
         return sc
     txt = run_adb(["shell", "wm", "size"])
-    m = re.search(r"Override size:\s*(\d+)x(\d+)", txt) or re.search(r"Physical size:\s*(\d+)x(\d+)", txt)
-    if not m:
+    size = _parse_wm_size(txt)
+    if not size:
         raise AdbError(f"Не удалось определить размер экрана: {txt}")
-    rw, rh = int(m.group(1)), int(m.group(2))
+    rw, rh = size
     vw = int(PH.get("view_width", 720))
     scale = rw / vw
-    sc = {"serial": SERIAL, "real_w": rw, "real_h": rh, "view_w": vw, "view_h": round(rh / scale), "scale": scale}
+    sc = {"serial": SERIAL, "real_w": rw, "real_h": rh, "view_w": vw, "view_h": round(rh / scale),
+          "scale": scale,
+          # Ориентация выводится только из соотношения сторон: поворот на 180°
+          # при тех же размерах этим не обнаруживается.
+          "orientation": "portrait" if rh >= rw else "landscape",
+          "captured_at": time.time()}
     update_state(lambda state: state.update({"screen": sc}))
     return sc
+
+
+def _invalidate_screen_cache():
+    def clear(state):
+        state.pop("screen", None)
+    update_state(clear)
+
+
+def _require_fresh_geometry():
+    """Сверяет кеш геометрии с фактическим wm size перед действием.
+
+    При расхождении кеш инвалидируется и действие отменяется: старые
+    координаты view нельзя молча применять к новому экрану. Надёжного
+    источника поворота на 180° среди используемых ADB-команд нет, поэтому
+    сравниваются размеры/соотношение w/h (см. ограничение в README).
+    """
+    stale = load_state().get("screen") or {}
+    try:
+        fresh = screen_info(refresh=True)
+    except AdbError:
+        _invalidate_screen_cache()
+        raise
+    if stale.get("serial") != SERIAL:
+        return fresh
+    old = (stale.get("real_w"), stale.get("real_h"))
+    new = (fresh.get("real_w"), fresh.get("real_h"))
+    if old != new:
+        _invalidate_screen_cache()
+        raise AdbError(
+            f"Геометрия экрана изменилась: кеш {old[0]}x{old[1]}, сейчас {new[0]}x{new[1]}. "
+            "Кеш геометрии сброшен; действие не выполнялось. Получите свежий экран "
+            "(python pdd.py screen) или дерево (python pdd.py ui) и повторите.")
+    return fresh
 
 
 def to_real(x, y):
@@ -196,16 +261,28 @@ def draw_grid(img: Image.Image) -> Image.Image:
     return Image.alpha_composite(img, layer).convert("RGB")
 
 
-def capture():
+def capture(check_geometry=True):
     png = run_adb(["exec-out", "screencap", "-p"], binary=True, timeout=30)
     if not png.startswith(b"\x89PNG"):
         raise AdbError("screencap вернул не PNG (экран заблокирован или защищён от записи?)")
-    return Image.open(io.BytesIO(png)).convert("RGB")
+    img = Image.open(io.BytesIO(png)).convert("RGB")
+    if check_geometry:
+        sc = load_state().get("screen") or {}
+        if (sc.get("serial") == SERIAL and sc.get("real_w") and sc.get("real_h")
+                and img.size != (sc["real_w"], sc["real_h"])):
+            _invalidate_screen_cache()
+            raise AdbError(
+                f"Размер скриншота {img.width}x{img.height} не совпадает с кешированной геометрией "
+                f"{sc['real_w']}x{sc['real_h']}. Кеш геометрии сброшен; снимок не использован. "
+                "Получите свежий экран: python pdd.py screen (и при необходимости ui).")
+    return img
 
 
 def cmd_screen(a):
     ensure_device()
-    img = capture()
+    # screen явно переустанавливает геометрию, поэтому строгая сверка capture
+    # здесь не применяется: несовпадение обрабатывается ниже.
+    img = capture(check_geometry=False)
     rw, rh = img.size
     sc = screen_info()
     if (rw, rh) != (sc["real_w"], sc["real_h"]):
@@ -302,32 +379,45 @@ def _require_player_touch_window(rx, ry):
         raise AdbError("Нельзя исключить перекрытие точки закрытия плеера.") from exc
 
 
-def _close_live_player_after_failed_dump():
-    """Один ограниченный тап только по подтверждённому визуально мини-плееру."""
-    try:
-        _require_pdd_focus()
-        first = capture()
-        if not _detect_live_player(first):
-            return False
-        time.sleep(0.5)
-        _require_pdd_focus()
-        second = capture()
-        if not _detect_live_player(second):
-            return False
-        # Видео должно действительно меняться: статичная картинка с X и
-        # похожей плашкой не даёт разрешения на нажатие.
-        region = (831, 585, 990, 855)
-        a = first.crop(region).resize((32, 54)).convert("RGB").tobytes()
-        b = second.crop(region).resize((32, 54)).convert("RGB").tobytes()
-        if sum(max(abs(a[i + j] - b[i + j]) for j in range(3)) >= 30
-               for i in range(0, len(a), 3)) < 40:
-            return False
-        _require_pdd_focus()
-        _require_player_touch_window(1022, 542)
-        tap_real(1022, 542)  # (681, 361) view, только проверенный крестик
-        return True
-    except (AdbError, OSError, TypeError, ValueError):
+def _require_player_tap_bounds(rx, ry):
+    """Точка закрытия должна быть в допустимой области текущего экрана."""
+    sc = screen_info()
+    if not (math.isfinite(rx) and math.isfinite(ry)):
+        raise AdbError("Некорректные координаты закрытия плеера; нажатие отменено.")
+    if not (0 <= rx < sc["real_w"] and 88 <= ry < sc["real_h"]):
+        raise AdbError("Точка закрытия плеера выходит за безопасные границы экрана; нажатие отменено.")
+
+
+def _close_live_player_confirmed():
+    """Один ограниченный тап только по подтверждённому визуально мини-плееру.
+
+    Возвращает False, если подтверждённого плеера нет. Любое сомнение
+    (второй кадр, отсутствие движения видео, смена фокуса, перекрытие окна)
+    поднимает AdbError с причиной и не выполняет нажатие. Вызывается только
+    из явной команды close-player, а не из путей чтения.
+    """
+    _require_pdd_focus()
+    first = capture()
+    if not _detect_live_player(first):
         return False
+    time.sleep(0.5)
+    _require_pdd_focus()
+    second = capture()
+    if not _detect_live_player(second):
+        raise AdbError("Мини-плеер не подтверждён на втором свежем кадре; нажатие не выполнялось.")
+    # Видео должно действительно меняться: статичная картинка с X и
+    # похожей плашкой не даёт разрешения на нажатие.
+    region = (831, 585, 990, 855)
+    a = first.crop(region).resize((32, 54)).convert("RGB").tobytes()
+    b = second.crop(region).resize((32, 54)).convert("RGB").tobytes()
+    if sum(max(abs(a[i + j] - b[i + j]) for j in range(3)) >= 30
+           for i in range(0, len(a), 3)) < 40:
+        raise AdbError("Видео мини-плеера не меняется; перекрытие не подтверждено, нажатие не выполнялось.")
+    _require_pdd_focus()
+    _require_player_tap_bounds(1022, 542)
+    _require_player_touch_window(1022, 542)
+    tap_real(1022, 542)  # (681, 361) view, только проверенный крестик
+    return True
 
 
 def _dump_ui_attempts(compressions):
@@ -366,29 +456,23 @@ def _dump_ui_attempts(compressions):
 
 
 def dump_ui_xml():
+    """Только чтение дерева: не нажимает, не свайпает и не шлёт keyevent.
+
+    Автоматическое закрытие мини-плеера здесь запрещено: путь чтения обязан
+    оставаться пассивным даже при ошибках и повторах. Для закрытия перекрытия
+    есть отдельная явная команда close-player.
+    """
     xml, last, idle_like = _dump_ui_attempts((False,))
     if xml is not None:
         return xml
-    attempted_close = idle_like
-    player_closed = attempted_close and _close_live_player_after_failed_dump()
-    if player_closed:
-        # Повтор не может использовать старый XML и не закрывает плеер повторно.
-        xml, last, retry_idle = _dump_ui_attempts((False,))
-        if xml is not None:
-            return xml
-        idle_like = idle_like and retry_idle
     # Сжатый дамп предназначен для просмотра; read_ui_elements(require_full=True)
     # по-прежнему не допускает нажатия на его основании.
     xml, last, compressed_idle = _dump_ui_attempts((True,))
     if xml is not None:
         return xml
     idle_like = idle_like and compressed_idle
-    if player_closed:
-        player_detail = "Выполнена попытка закрыть распознанный мини-плеер, но дерево по-прежнему недоступно. "
-    elif attempted_close:
-        player_detail = "Мини-плеер не был автоматически закрыт: его наличие или безопасность не подтверждены. "
-    else:
-        player_detail = ""
+    player_detail = ("Дерево UI недоступно; автоматических действий (tap/swipe/keyevent) не выполнялось. "
+                     "Для закрытия перекрытия используйте явную команду close-player. ")
     if "could not get idle state" in last.lower():
         reason = "Android сообщает: could not get idle state."
     elif "Таймаут команды" in last:
@@ -548,6 +632,7 @@ def ui_signature(els):
 
 
 UI_MAX_AGE_SECONDS = 180
+PLAYER_CLOSE_TREE_MAX_AGE_SECONDS = 15
 _PAGE_ANCHOR_IDS = frozenset({"goods_title", "goods_name", "product_title", "product_name",
                               "mall_name", "shop_name", "store_name", "tv_title"})
 
@@ -699,15 +784,45 @@ def cmd_ui_short_idle(a):
 
 
 # ----------------------------------------------------------------- Actions
+def _send_action_adb(args, **kwargs):
+    """Отправка действия без слепого повтора при таймауте.
+
+    Если ответа нет, неизвестно, дошла ли команда до устройства. Повторять
+    вслепую нельзя: сначала нужно проверить экран/дерево (screen/ui).
+    """
+    try:
+        return run_adb(args, **kwargs)
+    except subprocess.TimeoutExpired as exc:
+        raise AdbError(
+            "Таймаут после отправки действия: unknown — неизвестно, выполнено ли действие на устройстве. "
+            "Повтор вслепую запрещён; сначала проверьте экран (python pdd.py screen/ui).") from exc
+    except AdbError as exc:
+        if "Таймаут команды" in str(exc):
+            raise AdbError(
+                "Таймаут после отправки действия: unknown — неизвестно, выполнено ли действие на устройстве. "
+                "Повтор вслепую запрещён; сначала проверьте экран (python pdd.py screen/ui).") from exc
+        raise
+
+
 def tap_real(rx, ry, long_ms=0):
     if long_ms:
-        run_adb(["shell", "input", "swipe", rx, ry, rx, ry, long_ms])
-    else:
-        run_adb(["shell", "input", "tap", rx, ry])
+        # Долгое нажатие отправлялось через `input swipe` с совпадающими
+        # точками, то есть было настоящим жестом. Поэтому блокировка жестов
+        # обязана перехватывать его до любого run_adb, как scroll/swipe.
+        # Прежняя реализация сохранена в истории git и вернётся только после
+        # отдельной приёмки жестов; обхода через env/CLI/config нет.
+        _blocked_gesture("Длительное нажатие (--long)")
+    _send_action_adb(["shell", "input", "tap", rx, ry])
     pace()
 
 
-FORBIDDEN_LABELS = {"全选", "去结算", "立即支付", "提交订单", "确认支付"}
+FORBIDDEN_LABELS = {"全选", "Выбрать всё", "去结算", "立即支付", "提交订单", "确认支付"}
+# «Выбрать всё» is the Russian wording for 全选 used in rules/PDD-SECTION.md.
+# The list is deliberately limited to wording documented in the rules/skill;
+# it is not an exhaustive classifier of every possible UI label.
+# Single-card 删除 is not in the hard set: the skill allows it only as an
+# explicit, one-card operation. Mass selection/deletion is blocked separately
+# below by 全选 and the left-bottom dangerous zone.
 # Observed on the card next to another buyer's group; unlike 发起拼单 it
 # enters an existing group and is not authorized by merely inspecting SKU.
 GROUP_JOIN_LABELS = {"直接拼成"}
@@ -716,6 +831,14 @@ GROUP_JOIN_LABELS = {"直接拼成"}
 def _is_forbidden(e):
     return e.get("forbidden", False) or e.get("group_join_forbidden", False) or any(label in (e.get(k) or "")
                for k in ("label", "desc") for label in FORBIDDEN_LABELS | GROUP_JOIN_LABELS)
+
+
+def _is_mass_selection_tree(els):
+    """Признак режима массового выбора: в дереве есть 全选/«Выбрать всё»."""
+    markers = ("全选", "Выбрать всё")
+    return any((e.get("label") or "").startswith(markers)
+               or any(marker in (e.get("desc") or "") for marker in markers)
+               for e in els)
 
 
 def _require_pdd_focus():
@@ -745,6 +868,15 @@ def _require_pdd_focus():
 
 
 def _check_target(x, y, els, force=False):
+    """Проверяет точку касания по свежему дереву и активному окну.
+
+    Учитывает статус-бар, границы экрана, системные/чужие элементы,
+    распознанную цель, запрещённые контейнеры и опасные зоны. Для обычного
+    tap получатель касания подтверждается только активным окном PDD и
+    деревом UI; разбор input-dispatch (touch-window guard) применяется
+    отдельно в close-player. force не отменяет жёсткие запреты и безымянные
+    слои в опасной нижней зоне. Остаточная гонка TOCTOU не устраняется.
+    """
     if y < 88:
         raise AdbError("БЛОКИРОВКА КООРДИНАТ: y < 88 попадает в системный статус-бар Android.")
     sc = screen_info()
@@ -778,6 +910,19 @@ def _check_target(x, y, els, force=False):
     if x < 120 and y > 1430 and any(e.get("label", "").startswith(("全选", "删除")) for e in els):
         raise AdbError("БЛОКИРОВКА БЕЗОПАСНОСТИ: опасная область массового выбора; используйте одиночные элементы после ui.")
 
+    # Нижняя панель карточки (покупка/избранное/меню) и левый нижний угол
+    # (全选/удаление) опасны: безымянный кликабельный слой здесь не позволяет
+    # доказать назначение даже при --force. Слой-предок распознанной цели —
+    # это обычный контейнер раскладки, его не блокируем.
+    for e in els:
+        if not (e.get("placeholder") and e.get("click") and covers(e)):
+            continue
+        path = e.get("tree_path")
+        ancestor = path and any(r.get("tree_path", "").startswith(path + "/") for r in recognized)
+        if not ancestor and y >= 1430:
+            raise AdbError("БЛОКИРОВКА БЕЗОПАСНОСТИ: безымянный кликабельный элемент в опасной "
+                           "нижней зоне; нельзя подтвердить его назначение. Нажатие отменено.")
+
     # Геометрия и класс не доказывают, что отдельный слой находится под
     # кнопкой. Надёжным признаком контейнера считаем только предка цели.
     if not force:
@@ -790,122 +935,268 @@ def _check_target(x, y, els, force=False):
                 raise AdbError("В точке есть безымянный кликабельный слой; нельзя исключить перекрытие. Нажатие отменено.")
 
 
+# Единый путь проверок перед действиями. Полностью объединить команды в один
+# helper нельзя без изменения поведения: tap/tapel работают с координатами,
+# text/key — с фокусом, close-player — с изображением и touch-window.
+# Последовательность по командам:
+#   tap:          ensure_device → _require_pdd_focus → свежий полный дамп →
+#                 _check_target → _require_pdd_focus → input tap.
+#   tapel:        ensure_device → сохранённое дерево (serial/quality/fresh/
+#                 anchors) → на каждый индекс: _require_pdd_focus → свежесть →
+#                 новый полный дамп → anchors + идентичность цели →
+#                 _check_target → _require_pdd_focus → input tap.
+#   close-player: ensure_device → _require_pdd_focus → свежий полный дамп →
+#                 _require_pdd_focus → два кадра плеера, границы экрана,
+#                 touch-window guard → input tap.
+#   text:         ensure_device → _require_focused_editable (focus, свежий
+#                 полный дамп, фокус на поле PDD, контекст поиска) → ввод;
+#                 перед Enter проверка повторяется.
+#   key:          ensure_device → _require_pdd_focus → свежий полный дамп
+#                 (для del/search — подтверждённое поле ввода) →
+#                 _require_pdd_focus → keyevent.
+# Любая проверка при недоступности или неоднозначности завершает действие
+# ошибкой. Проверки уменьшают, но не устраняют гонку TOCTOU между последней
+# проверкой и касанием: Android может изменить окно/цель за это время.
 def cmd_tap(a):
+    """Координатный тап. Не подтверждает идентичность карточки/магазина/SKU.
+
+    Для товарно-зависимых действий (收藏, удаление, выбор варианта) используйте
+    tapel: он сверяет anchors страницы и идентичность элемента. Для tap такой
+    сверки нет, поэтому здесь проверяются только окно, свежее дерево и
+    распознанная цель в точке.
+    """
+    if getattr(a, "long", 0):
+        # Отказ до ensure_device/_require_pdd_focus/дампа: --long — это жест,
+        # и он не должен отправлять на устройство даже диагностический ADB.
+        _blocked_gesture("Длительное нажатие (--long)")
     ensure_device()
-    _require_pdd_focus()
-    els = read_ui_elements(include_all=True, require_full=True)
-    _check_target(a.x, a.y, els, force=getattr(a, "force", False))
-    _require_pdd_focus()
-    rx, ry = to_real(a.x, a.y)
-    tap_real(rx, ry, a.long)
-    out({"ok": True, "action": "tap", "view": [a.x, a.y], "real": [rx, ry]})
+    with device_lock(SERIAL):
+        _require_fresh_geometry()
+        _require_pdd_focus()
+        els = read_ui_elements(include_all=True, require_full=True)
+        _check_target(a.x, a.y, els, force=getattr(a, "force", False))
+        _require_pdd_focus()
+        rx, ry = to_real(a.x, a.y)
+        tap_real(rx, ry, a.long)
+        out({"ok": True, "action": "tap", "view": [a.x, a.y], "real": [rx, ry],
+             "confirmation": "command_sent",
+             "note": "Команда отправлена; изменение состояния не подтверждено. Проверьте свежий screen/ui."})
 
 
 def cmd_tapel(a):
+    """Тап по сохранённому индексу с повторной проверкой цели и страницы.
+
+    Порядок: ensure_device → сохранённое дерево (серийный номер, полнота,
+    свежесть, anchors) → для каждого индекса: focus → повторная свежесть →
+    новый полный дамп → сверка anchors и идентичности элемента → _check_target
+    → focus → tap. Это не устраняет остаточную гонку (TOCTOU) между последней
+    проверкой и касанием; при сомнении действие нужно не выполнять. Успешный
+    вывод означает отправленное касание, а не подтверждённое сохранение,
+    удаление или выбор варианта — результат проверяется отдельным свежим ui.
+    """
+    if getattr(a, "long", 0):
+        _blocked_gesture("Длительное нажатие (--long)")
     ensure_device()
-    st = load_state()
-    els = st.get("ui") or []
-    signature = st.get("ui_signature")
-    if not signature or st.get("ui_serial") != SERIAL:
-        raise AdbError("Нет актуального дерева для этого устройства; сначала выполните python pdd.py ui.")
-    if st.get("ui_quality") != "full":
-        raise AdbError("Исходное дерево не подтверждено как полное; повторите python pdd.py ui.")
-    _require_fresh_ui(st)
-    anchors = st.get("ui_page_anchors")
-    if (not isinstance(anchors, list)
-            or any(not isinstance(anchor, (tuple, list)) or len(anchor) != 3
-                   or not all(isinstance(v, str) for v in anchor) for anchor in anchors)):
-        raise AdbError("Нет данных контекста экрана; повторите python pdd.py ui.")
-    indices = a.indices if isinstance(a.indices, list) else [a.indices]
-    for idx in indices:
-        if not (0 <= idx < len(els)):
-            raise AdbError(f"Нет элемента [{idx}] — сначала выполните python pdd.py ui")
-        if _is_forbidden(els[idx]):
-            raise AdbError(f"БЛОКИРОВКА БЕЗОПАСНОСТИ: запрещён элемент [{idx}].")
-    tapped = []
-    for idx in indices:
-        e = els[idx]
-        try:
-            _require_pdd_focus()
-            _require_fresh_ui(st)
-            current = read_ui_elements(include_all=True, require_full=True)
-            _require_fresh_ui(st)
-            # После сериализации JSON кортежи становятся списками.
-            saved_anchors = sorted(tuple(anchor) for anchor in anchors)
-            if _ui_page_anchors(current) != saved_anchors:
-                raise AdbError("Изменились доступные признаки страницы; повторите python pdd.py ui.")
-            # Таймеры и ленты покупок меняются независимо от цели. Сверяем
-            # сам элемент, а не хеш всего дерева; неоднозначность опасна.
-            same_identity = [c for c in current
-                             if all(c.get(k) == e.get(k) for k in
-                                    ("label", "desc", "rid", "placeholder", "package", "click"))]
-            matches = [c for c in same_identity
-                       if abs(c["vx"] - e["vx"]) <= 8 and abs(c["vy"] - e["vy"]) <= 8]
-            if not matches:
-                reason = ("Элемент переместился" if same_identity
-                          else "Элемент отсутствует или изменился")
-                raise AdbError(f"{reason} после ui; повторите python pdd.py ui.")
-            if len(matches) > 1:
-                raise AdbError("В актуальном дереве несколько подходящих элементов; "
-                               "нажатие неоднозначно. Повторите python pdd.py ui.")
-            target = matches[0]
-            _check_target(target["vx"], target["vy"], current)
-            _require_pdd_focus()
-        except AdbError as ex:
-            raise AdbError(f"Последовательность остановлена; выполнено нажатий: {len(tapped)}. {ex}") from ex
-        tap_real(target["rx"], target["ry"], a.long)
-        tapped.append({"index": idx, "label": target["label"], "view": [target["vx"], target["vy"]]})
-    if len(tapped) == 1:
-        out({"ok": True, "action": "tapel", "label": tapped[0]["label"], "view": tapped[0]["view"]})
-    else:
-        out({"ok": True, "action": "tapel", "tapped": tapped, "label": tapped[-1]["label"], "view": tapped[-1]["view"]})
+    with device_lock(SERIAL):
+        _require_fresh_geometry()
+        st = load_state()
+        els = st.get("ui") or []
+        signature = st.get("ui_signature")
+        if not signature or st.get("ui_serial") != SERIAL:
+            raise AdbError("Нет актуального дерева для этого устройства; сначала выполните python pdd.py ui.")
+        if st.get("ui_quality") != "full":
+            raise AdbError("Исходное дерево не подтверждено как полное; повторите python pdd.py ui.")
+        _require_fresh_ui(st)
+        anchors = st.get("ui_page_anchors")
+        if (not isinstance(anchors, list)
+                or any(not isinstance(anchor, (tuple, list)) or len(anchor) != 3
+                       or not all(isinstance(v, str) for v in anchor) for anchor in anchors)):
+            raise AdbError("Нет данных контекста экрана; повторите python pdd.py ui.")
+        indices = a.indices if isinstance(a.indices, list) else [a.indices]
+        for idx in indices:
+            if not (0 <= idx < len(els)):
+                raise AdbError(f"Нет элемента [{idx}] — сначала выполните python pdd.py ui")
+            if _is_forbidden(els[idx]):
+                raise AdbError(f"БЛОКИРОВКА БЕЗОПАСНОСТИ: запрещён элемент [{idx}].")
+        if len(indices) > 1:
+            # Один вызов не должен отмечать несколько чекбоксов: в 全部收藏 это
+            # массовый выбор, а безымянные элементы нельзя отличить от служебных
+            # чекбоксов. Разрешены только явные одиночные действия.
+            if any(els[idx].get("placeholder") for idx in indices):
+                raise AdbError("Несколько безымянных целей за один tapel недопустимы: "
+                               "это может быть массовый выбор. Нажимайте по одной.")
+            if _is_mass_selection_tree(els):
+                raise AdbError("На экране режим массового выбора (全选): несколько целей "
+                               "за один tapel запрещены. Нажимайте по одной.")
+        tapped = []
+        for idx in indices:
+            e = els[idx]
+            try:
+                _require_pdd_focus()
+                _require_fresh_ui(st)
+                current = read_ui_elements(include_all=True, require_full=True)
+                _require_fresh_ui(st)
+                if len(indices) > 1 and _is_mass_selection_tree(current):
+                    raise AdbError("Экран перешёл в режим массового выбора (全选); "
+                                   "несколько целей за один tapel запрещены.")
+                # После сериализации JSON кортежи становятся списками.
+                saved_anchors = sorted(tuple(anchor) for anchor in anchors)
+                if _ui_page_anchors(current) != saved_anchors:
+                    raise AdbError("Изменились доступные признаки страницы; повторите python pdd.py ui.")
+                # Таймеры и ленты покупок меняются независимо от цели. Сверяем
+                # сам элемент, а не хеш всего дерева; неоднозначность опасна.
+                same_identity = [c for c in current
+                                 if all(c.get(k) == e.get(k) for k in
+                                        ("label", "desc", "rid", "placeholder", "package", "click"))]
+                matches = [c for c in same_identity
+                           if abs(c["vx"] - e["vx"]) <= 8 and abs(c["vy"] - e["vy"]) <= 8]
+                if not matches:
+                    reason = ("Элемент переместился" if same_identity
+                              else "Элемент отсутствует или изменился")
+                    raise AdbError(f"{reason} после ui; повторите python pdd.py ui.")
+                if len(matches) > 1:
+                    raise AdbError("В актуальном дереве несколько подходящих элементов; "
+                                   "нажатие неоднозначно. Повторите python pdd.py ui.")
+                target = matches[0]
+                _check_target(target["vx"], target["vy"], current)
+                _require_pdd_focus()
+            except AdbError as ex:
+                raise AdbError(f"Последовательность остановлена; выполнено нажатий: {len(tapped)}. {ex}") from ex
+            tap_real(target["rx"], target["ry"], a.long)
+            tapped.append({"index": idx, "label": target["label"], "view": [target["vx"], target["vy"]]})
+        if len(tapped) == 1:
+            out({"ok": True, "action": "tapel", "label": tapped[0]["label"], "view": tapped[0]["view"],
+                 "confirmation": "command_sent",
+                 "note": "Касание отправлено; изменение состояния не подтверждено. Проверьте свежий screen/ui."})
+        else:
+            out({"ok": True, "action": "tapel", "tapped": tapped, "label": tapped[-1]["label"],
+                 "view": tapped[-1]["view"], "confirmation": "command_sent",
+                 "note": "Касания отправлены; изменение состояния не подтверждено. Проверьте свежий screen/ui."})
+
+
+def _blocked_gesture(action):
+    """Исполняемая блокировка жестов до приёмки геометрии и guard'а.
+
+    Отказ происходит до ensure_device/screen_info/run_adb. Обхода через
+    env/CLI/config нет: команда сохранена только для совместимости и всегда
+    завершается ошибкой.
+    """
+    raise AdbError(
+        f"{action}: жест заблокирован до независимой приёмки источника геометрии "
+        "экрана и guard'а жестов. Прокрутка, свайп и длительное нажатие запрещены. "
+        "Команда не выполнялась, на устройство ничего не отправлено."
+    )
 
 
 def cmd_scroll(a):
-    ensure_device()
-    _require_pdd_focus()
-    if not math.isfinite(a.amount) or not 1 <= a.ms <= 2000:
-        raise AdbError("Некорректная скорость или длительность прокрутки.")
-    sc = screen_info()
-    w, h = sc["real_w"], sc["real_h"]
-    k = max(0.1, min(0.85, a.amount))
-    cx, cy = w // 2, int(h * 0.55)
-    dy, dx = int(h * k / 2), int(w * k / 2)
-    # direction = куда сдвигается содержимое для просмотра (down = увидеть то, что ниже)
-    vec = {"down": (cx, cy + dy, cx, cy - dy), "up": (cx, cy - dy, cx, cy + dy),
-           "right": (cx + dx, cy, cx - dx, cy), "left": (cx - dx, cy, cx + dx, cy)}[a.direction]
-    distance = math.hypot(vec[2] - vec[0], vec[3] - vec[1]) / sc["scale"]
-    if distance < 80 or distance / a.ms < 0.12:
-        raise AdbError("Слишком короткая или медленная прокрутка может сработать как нажатие; действие отменено.")
-    run_adb(["shell", "input", "swipe", *vec, a.ms])
-    pace()
-    player_tapped = _close_live_player_after_failed_dump()
-    out({"ok": True, "action": "scroll", "direction": a.direction, "amount": k,
-         "player_close_attempted": player_tapped})
+    _blocked_gesture("scroll")
 
 
 def cmd_swipe(a):
+    _blocked_gesture("swipe")
+
+
+def cmd_close_player(a):
+    """Явное действие закрытия подтверждённого мини-плеера.
+
+    Из путей чтения не вызывается. Требует свежий полный дамп UI; сохранённое
+    или устаревшее дерево не используется. При неоднозначности/неподтверждении
+    отказывает без нажатия. После нажатия плеер проверяется повторно: только
+    фактическое отсутствие даёт state_confirmed, иначе результат unknown.
+    """
     ensure_device()
-    _require_pdd_focus()
-    sc = screen_info()
-    coords = (a.x1, a.y1, a.x2, a.y2)
-    if (not all(math.isfinite(v) for v in coords)
-            or not (0 <= a.x1 < sc["view_w"] and 0 <= a.x2 < sc["view_w"]
-                    and 88 <= a.y1 < sc["view_h"] and 88 <= a.y2 < sc["view_h"])):
-        raise AdbError("Свайп выходит за пределы экрана или попадает в статус-бар.")
-    distance = math.hypot(a.x2 - a.x1, a.y2 - a.y1)
-    if not 1 <= a.ms <= 2000 or distance < 80 or distance / a.ms < 0.12:
-        raise AdbError("Слишком короткий или медленный свайп может сработать как нажатие; действие отменено.")
-    x1, y1 = to_real(a.x1, a.y1)
-    x2, y2 = to_real(a.x2, a.y2)
-    run_adb(["shell", "input", "swipe", x1, y1, x2, y2, a.ms])
-    pace()
-    player_tapped = _close_live_player_after_failed_dump()
-    out({"ok": True, "action": "swipe", "player_close_attempted": player_tapped})
+    with device_lock(SERIAL):
+        _require_fresh_geometry()
+        _require_pdd_focus()
+        started = time.time()
+        read_ui_elements(include_all=True, require_full=True)
+        finished = time.time()
+        if not (math.isfinite(started) and math.isfinite(finished)
+                and 0 <= finished - started <= PLAYER_CLOSE_TREE_MAX_AGE_SECONDS):
+            raise AdbError("Дерево UI несвежее или время системы изменилось; "
+                           "закрытие плеера отменено, нажатие не выполнялось.")
+        _require_pdd_focus()
+        if not _close_live_player_confirmed():
+            out({"ok": True, "action": "close-player", "result": "not_found",
+                 "player_closed": False, "confirmation": "no_action",
+                 "message": "Подтверждённый мини-плеер не найден; нажатие не выполнялось."})
+            return
+        try:
+            _require_pdd_focus()
+            still_open = _detect_live_player(capture())
+        except AdbError as exc:
+            out({"ok": True, "action": "close-player", "result": "unknown",
+                 "player_closed": False, "confirmation": "unknown",
+                 "message": "Нажатие отправлено, но проверить закрытие плеера не удалось: "
+                            f"{exc} Результат неизвестен; повторять вслепую нельзя, "
+                            "сначала проверьте свежий screen/ui."})
+            return
+        if still_open:
+            out({"ok": True, "action": "close-player", "result": "unknown",
+                 "player_closed": False, "confirmation": "unknown",
+                 "message": "Нажатие отправлено, но мини-плеер всё ещё виден; "
+                            "результат не подтверждён. Не заявляйте, что плеер закрыт; "
+                            "проверьте свежий screen/ui."})
+            return
+        out({"ok": True, "action": "close-player", "result": "closed",
+             "player_closed": True, "confirmation": "state_confirmed",
+             "message": "После нажатия мини-плеер повторно не обнаружен; закрытие подтверждено."})
 
 
 def has_adbkeyboard():
-    return "com.android.adbkeyboard" in run_adb(["shell", "pm", "list", "packages", "com.android.adbkeyboard"], check=False)
+    return ADBKEYBOARD_PACKAGE in run_adb(
+        ["shell", "pm", "list", "packages", ADBKEYBOARD_PACKAGE], check=False)
+
+
+def _adbkeyboard_apk_paths():
+    txt = run_adb(["shell", "pm", "path", ADBKEYBOARD_PACKAGE], check=False)
+    paths = []
+    for line in txt.splitlines():
+        line = line.strip()
+        if line.startswith("package:"):
+            path = line[len("package:"):].strip()
+            if path:
+                paths.append(path)
+    return paths
+
+
+def _sha256_remote_file(path):
+    try:
+        data = run_adb(["exec-out", "cat", path], binary=True, timeout=30)
+    except AdbError:
+        return None
+    return hashlib.sha256(data).hexdigest()
+
+
+def adbkeyboard_status():
+    """Best-effort проверка установленного ADBKeyboard по закреплённому SHA-256.
+
+    В репозитории нет закреплённого сертификата/подписи ADBKeyboard, поэтому
+    доверенного значения для signer нет: выдумывать его нельзя. Вместо этого
+    сравнивается содержимое установленного base.apk с уже закреплённым SHA-256
+    APK. ``unknown`` означает, что пакет найден, но APK прочитать/сверить не
+    удалось (split-APK, ограничения доступа, ошибка чтения). Это не является
+    подтверждением подлинности, и вызывающий код обязан явно предупредить.
+    """
+    listed = run_adb(["shell", "pm", "list", "packages", ADBKEYBOARD_PACKAGE], check=False)
+    if ADBKEYBOARD_PACKAGE not in listed:
+        return {"installed": False, "authenticity": "not_installed"}
+    paths = _adbkeyboard_apk_paths()
+    if len(paths) != 1:
+        return {"installed": True, "authenticity": "unknown",
+                "reason": "не удалось однозначно определить установленный APK (split/несколько путей)"}
+    path = paths[0]
+    if not path.endswith("/base.apk"):
+        return {"installed": True, "authenticity": "unknown",
+                "reason": "установленный APK не является base.apk"}
+    digest = _sha256_remote_file(path)
+    if digest is None:
+        return {"installed": True, "authenticity": "unknown",
+                "reason": "не удалось прочитать установленный APK"}
+    if digest.lower() == ADBKEYBOARD_SHA256:
+        return {"installed": True, "authenticity": "authentic", "path": path}
+    return {"installed": True, "authenticity": "tampered", "path": path,
+            "reason": "SHA-256 установленного APK не совпал с закреплённым"}
 
 
 def _sha256_file(path: Path) -> str:
@@ -924,8 +1215,13 @@ def verify_adbkeyboard_apk(path: Path) -> None:
         raise AdbError("ADBKeyboard.apk не совпал по SHA-256; файл удалён, установка отменена")
 
 
-def _require_focused_editable(expected=None, require_search=False):
-    """Сверяет вводимый элемент по свежему несжатому дереву, без записи XML."""
+def _inspect_focused_editable(expected=None, require_search=False):
+    """Сверяет вводимый элемент по свежему несжатому дереву, без записи XML.
+
+    Возвращает (identity, text): identity нужен для повторной сверки поля,
+    text — фактическое содержимое поля по данным uiautomator (None, если
+    атрибут отсутствует и содержимое проверить нельзя).
+    """
     _require_pdd_focus()
     xml = dump_ui_xml()
     if getattr(xml, "compressed", None) is not False:
@@ -984,6 +1280,11 @@ def _require_focused_editable(expected=None, require_search=False):
     if expected is not None and identity != expected:
         raise AdbError("Сфокусированное поле изменилось после ввода; Enter отменён.")
     _require_pdd_focus()
+    return identity, node.get("text")
+
+
+def _require_focused_editable(expected=None, require_search=False):
+    identity, _ = _inspect_focused_editable(expected, require_search)
     return identity
 
 
@@ -992,60 +1293,114 @@ def cmd_text(a):
     text = Path(a.file).read_text(encoding="utf-8").strip() if a.file else a.text
     if text is None:
         raise AdbError("Нужен текст или --file")
-    target = _require_focused_editable(require_search=a.enter)
-    method = "input"
-    if has_adbkeyboard():
-        prev = run_adb(["shell", "settings", "get", "secure", "default_input_method"], check=False).strip()
-        run_adb(["shell", "ime", "enable", ADBKEYBOARD_IME], check=False)
-        try:
-            run_adb(["shell", "ime", "set", ADBKEYBOARD_IME], check=False)
-            time.sleep(0.6)
-            _require_focused_editable(target, require_search=a.enter)
+    with device_lock(SERIAL):
+        _require_fresh_geometry()
+        target = _require_focused_editable(require_search=a.enter)
+        method = "input"
+        warning = None
+        kb = adbkeyboard_status()
+        if kb["installed"]:
+            if kb["authenticity"] == "tampered":
+                raise AdbError(
+                    "Установленный ADBKeyboard не совпал с закреплённым APK; ввод через него отменён. "
+                    "Удалите пакет и установите заново из проверенного APK.")
+            if kb["authenticity"] != "authentic":
+                warning = (
+                    "Подлинность установленного ADBKeyboard не подтверждена: пакет найден, "
+                    "но его APK не удалось сверить с закреплённым SHA-256. Ввод продолжен только "
+                    "с этим предупреждением; broadcast ограничен именем пакета.")
+            prev = run_adb(["shell", "settings", "get", "secure", "default_input_method"], check=False).strip()
+            run_adb(["shell", "ime", "enable", ADBKEYBOARD_IME], check=False)
+            try:
+                run_adb(["shell", "ime", "set", ADBKEYBOARD_IME], check=False)
+                time.sleep(0.6)
+                _require_focused_editable(target, require_search=a.enter)
+                if a.clear:
+                    run_adb(["shell", "am", "broadcast", "-p", ADBKEYBOARD_PACKAGE,
+                             "-a", "ADB_CLEAR_TEXT"], check=False)
+                    time.sleep(0.3)
+                    _, cleared = _inspect_focused_editable(target, require_search=a.enter)
+                    if cleared is None:
+                        raise AdbError(
+                            "Очистка поля через ADBKeyboard не подтверждена: атрибут text отсутствует; "
+                            "текст не отправлен, ввод отменён.")
+                    if cleared:
+                        raise AdbError(
+                            "Очистка поля через ADBKeyboard не подтверждена: поле не пусто; "
+                            "текст не отправлен, ввод отменён.")
+                b64 = base64.b64encode(text.encode("utf-8")).decode()
+                _send_action_adb(["shell", "am", "broadcast", "-p", ADBKEYBOARD_PACKAGE,
+                                  "-a", "ADB_INPUT_B64", "--es", "msg", b64],
+                                 sensitive=True, redact=(text, b64))
+                time.sleep(0.5)
+                if a.enter:
+                    _require_focused_editable(target, require_search=True)
+                    _send_action_adb(["shell", "input", "keyevent", "66"])
+            finally:
+                if prev and "adbkeyboard" not in prev and prev != "null":
+                    time.sleep(0.3)
+                    run_adb(["shell", "ime", "set", prev], check=False)
+            method = "adbkeyboard"
+        else:
             if a.clear:
-                run_adb(["shell", "am", "broadcast", "-a", "ADB_CLEAR_TEXT"], check=False)
-            b64 = base64.b64encode(text.encode("utf-8")).decode()
-            run_adb(["shell", "am", "broadcast", "-a", "ADB_INPUT_B64", "--es", "msg", b64])
-            time.sleep(0.5)
+                raise AdbError(
+                    "--clear не поддерживается без ADBKeyboard: надёжной очистки через `input` нет. "
+                    "Текст не отправлен; установите ADBKeyboard или очистите поле вручную.")
+            if not text.isascii():
+                raise AdbError("Для ввода китайского/русского текста нужен ADBKeyboard: python pdd.py install-adbkeyboard")
+            _require_focused_editable(target, require_search=a.enter)
+            q = "'" + text.replace("'", "'\\''").replace(" ", "%s") + "'"
+            _send_action_adb(["shell", "input", "text", q], sensitive=True, redact=(text, q))
             if a.enter:
                 _require_focused_editable(target, require_search=True)
-                run_adb(["shell", "input", "keyevent", "66"])
-        finally:
-            if prev and "adbkeyboard" not in prev and prev != "null":
-                time.sleep(0.3)
-                run_adb(["shell", "ime", "set", prev], check=False)
-        method = "adbkeyboard"
-    else:
-        if not text.isascii():
-            raise AdbError("Для ввода китайского/русского текста нужен ADBKeyboard: python pdd.py install-adbkeyboard")
-        _require_focused_editable(target, require_search=a.enter)
-        q = "'" + text.replace("'", "'\\''").replace(" ", "%s") + "'"
-        run_adb(["shell", "input", "text", q])
-        if a.enter:
-            _require_focused_editable(target, require_search=True)
-            run_adb(["shell", "input", "keyevent", "66"])
-    pace()
-    out({"ok": True, "action": "text", "method": method, "text": text, "enter": a.enter})
+                _send_action_adb(["shell", "input", "keyevent", "66"])
+        pace()
+        result = {"ok": True, "action": "text", "method": method, "chars": len(text), "enter": a.enter,
+                  "confirmation": "command_sent",
+                  "adbkeyboard_authenticity": kb["authenticity"],
+                  "note": "Ввод отправлен; изменение состояния не подтверждено. Проверьте свежий screen/ui."}
+        if warning:
+            result["warning"] = warning
+        out(result)
 
 
 KEYS = {"back": 4, "home": 3, "recent": 187, "del": 67, "search": 84}
 
 
 def cmd_key(a):
+    """Навигационные клавиши с проверкой окна и свежего дерева.
+
+    Все клавиши требуют свежий полный дамп, чтобы действие не выполнялось на
+    устаревшем/неполном экране. del/search дополнительно требуют
+    подтверждённое поле PDD (для search — контекст поиска). Проверки не
+    устраняют TOCTOU между последней проверкой и keyevent.
+    """
     ensure_device()
     if a.key not in KEYS:
         raise AdbError("Клавиша запрещена: произвольный keyevent может активировать опасную кнопку.")
-    _require_pdd_focus()
-    code = KEYS[a.key]
-    run_adb(["shell", "input", "keyevent", code])
-    pace()
-    out({"ok": True, "action": "key", "key": a.key})
+    with device_lock(SERIAL):
+        _require_fresh_geometry()
+        _require_pdd_focus()
+        if a.key in ("del", "search"):
+            # _require_focused_editable уже получает свежее несжатое дерево.
+            _require_focused_editable(require_search=(a.key == "search"))
+        else:
+            read_ui_elements(include_all=True, require_full=True)
+        _require_pdd_focus()
+        code = KEYS[a.key]
+        _send_action_adb(["shell", "input", "keyevent", code])
+        pace()
+        out({"ok": True, "action": "key", "key": a.key, "confirmation": "command_sent",
+             "note": "Клавиша отправлена; изменение состояния не подтверждено. Проверьте свежий screen/ui."})
 
 
 def cmd_launch(a):
     ensure_device()
-    run_adb(["shell", "monkey", "-p", PH["package"], "-c", "android.intent.category.LAUNCHER", "1"])
-    time.sleep(3)
-    out({"ok": True, "action": "launch", "package": PH["package"]})
+    with device_lock(SERIAL):
+        _send_action_adb(["shell", "monkey", "-p", PH["package"], "-c", "android.intent.category.LAUNCHER", "1"])
+        time.sleep(3)
+        out({"ok": True, "action": "launch", "package": PH["package"], "confirmation": "command_sent",
+             "note": "Запуск отправлен; фактическое состояние не проверялось. Проверьте свежий screen/ui."})
 
 
 def cmd_wait(a):
@@ -1065,16 +1420,23 @@ def cmd_connect(a):
     target = a.target or PH.get("serial")
     if not target:
         raise AdbError("Укажите IP:PORT")
-    res = run_adb(["connect", target], use_serial=False, check=False, timeout=20).strip()
+    res = run_adb(["connect", target], use_serial=False, check=False, timeout=20,
+                  sensitive=True, redact=(target,)).strip()
     if "connected" in res and "cannot" not in res and "failed" not in res:
-        CFG["phone"]["serial"] = target
-        save_config(CFG)
+        def change(cfg):
+            cfg.setdefault("phone", {})["serial"] = target
+            return cfg
+        updated = update_config(change)
+        CFG["phone"]["serial"] = updated["phone"]["serial"]
     out({"result": res, "saved_serial": CFG["phone"].get("serial")})
 
 
 def cmd_pair(a):
-    res = run_adb(["pair", a.target, a.code], use_serial=False, check=False, timeout=30)
-    out({"result": res.strip(), "next": "Теперь: python pdd.py connect IP:PORT (порт подключения, не порт сопряжения)"})
+    res = run_adb(["pair", a.target, a.code], use_serial=False, check=False, timeout=30,
+                  sensitive=True, redact=(a.code,)).strip()
+    if a.code:
+        res = res.replace(a.code, "***")
+    out({"result": res, "next": "Теперь: python pdd.py connect IP:PORT (порт подключения, не порт сопряжения)"})
 
 
 def cmd_status(a):
@@ -1085,7 +1447,9 @@ def cmd_status(a):
         info["android"] = run_adb(["shell", "getprop", "ro.build.version.release"], check=False).strip()
         info["screen"] = screen_info(refresh=True)
         info["pinduoduo_installed"] = PH["package"] in run_adb(["shell", "pm", "list", "packages", PH["package"]], check=False)
-        info["adbkeyboard_installed"] = has_adbkeyboard()
+        keyboard = adbkeyboard_status()
+        info["adbkeyboard_installed"] = keyboard["installed"]
+        info["adbkeyboard"] = keyboard
         info["ok"] = True
     except (AdbError, StateError) as e:
         info["ok"] = False
@@ -1095,18 +1459,29 @@ def cmd_status(a):
 
 def cmd_install_adbkeyboard(a):
     ensure_device()
-    if has_adbkeyboard():
-        out({"ok": True, "note": "ADBKeyboard уже установлен"})
+    keyboard = adbkeyboard_status()
+    if keyboard["installed"]:
+        if keyboard["authenticity"] == "tampered":
+            raise AdbError(
+                "Установлен ADBKeyboard, но его APK не совпал с закреплённым SHA-256. "
+                "Установка не выполняется; удалите пакет вручную и повторите.")
+        if keyboard["authenticity"] == "authentic":
+            out({"ok": True, "note": "ADBKeyboard уже установлен и совпал с закреплённым APK"})
+        else:
+            out({"ok": False, "installed": True, "authenticity": "unknown",
+                 "note": "ADBKeyboard установлен, но подлинность не подтверждена: "
+                         f"{keyboard.get('reason', 'причина неизвестна')}. Установка не выполнялась."})
         return
     apk = ROOT / "tools" / "ADBKeyboard.apk"
     apk.parent.mkdir(exist_ok=True)
     if not apk.exists():
         urllib.request.urlretrieve(ADBKEYBOARD_URL, apk)
     verify_adbkeyboard_apk(apk)
-    res = run_adb(["install", "-r", str(apk)], check=False, timeout=120)
-    run_adb(["shell", "ime", "enable", ADBKEYBOARD_IME], check=False)
-    out({"ok": "Success" in res, "result": res.strip(),
-         "hint": "Если установка отклонена: на Xiaomi включите «Установка через USB»; на телефоне подтвердите установку."})
+    with device_lock(SERIAL):
+        res = run_adb(["install", "-r", str(apk)], check=False, timeout=120)
+        run_adb(["shell", "ime", "enable", ADBKEYBOARD_IME], check=False)
+        out({"ok": "Success" in res, "result": res.strip(), "confirmation": "command_sent",
+             "hint": "Если установка отклонена: на Xiaomi включите «Установка через USB»; на телефоне подтвердите установку."})
 
 
 # ----------------------------------------------------------------- Dossier
@@ -1145,6 +1520,70 @@ def cmd_dossier(a):
     out({"collage": str(p), "size": list(canvas.size)})
 
 
+PHOTO_REMOTE_DIRS = ("/sdcard/DCIM/Camera", "/sdcard/Pictures")
+PHOTO_NAME_PREFIX = "pdd_search_ref"
+
+
+def _safe_photo_name(name):
+    """Один компонент имени без разделителей и переходов по каталогам."""
+    if not isinstance(name, str) or not name:
+        raise AdbError("Некорректное имя файла для устройства")
+    if "/" in name or "\\" in name or name in (".", "..") or "\x00" in name:
+        raise AdbError("Некорректное имя файла для устройства: разделители пути и переходы запрещены")
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,120}", name):
+        raise AdbError("Некорректное имя файла для устройства: допустимы только буквы, цифры, "
+                       "точка, подчёркивание и дефис")
+    return name
+
+
+def _photo_remote_path(directory, name):
+    if directory not in PHOTO_REMOTE_DIRS:
+        raise AdbError("Недопустимая папка на устройстве для фото поиска")
+    return f"{directory.rstrip('/')}/{_safe_photo_name(name)}"
+
+
+def _photo_candidate_name():
+    stamp = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
+    return f"{PHOTO_NAME_PREFIX}_{stamp}_{uuid.uuid4().hex[:10]}.jpg"
+
+
+def _unique_local_photo_path():
+    base = ROOT / "logs"
+    base.mkdir(parents=True, exist_ok=True)
+    for _ in range(5):
+        candidate = base / _photo_candidate_name()
+        if not candidate.exists():
+            return candidate
+    raise AdbError("Не удалось подобрать свободное локальное имя для фото")
+
+
+def _remote_file_exists(path):
+    res = run_adb(["shell", f"test -e {path} && echo EXISTS || echo MISSING"], check=False)
+    text = (res or "").strip()
+    if "EXISTS" in text:
+        return True
+    if "MISSING" in text:
+        return False
+    raise AdbError("Не удалось проверить существование файла на устройстве; загрузка отменена.")
+
+
+def _push_unique_remote_photo(local_path, directory):
+    """Проверяет отсутствие файла и загружает под уникальным именем.
+
+    adb push не предоставляет атомарного create-only: между проверкой и
+    отправкой остаётся гонка. Уникальное имя (время + случайный суффикс) и
+    проверка существования снижают риск перезаписи, но не дают атомарной
+    гарантии на устройстве.
+    """
+    for _ in range(5):
+        candidate = _photo_remote_path(directory, _photo_candidate_name())
+        if _remote_file_exists(candidate):
+            continue
+        _send_action_adb(["push", str(local_path), candidate])
+        return candidate
+    raise AdbError("Не удалось подобрать свободное имя файла на устройстве; загрузка отменена.")
+
+
 def cmd_push_photo(a):
     ensure_device()
     src = Path(a.image)
@@ -1156,30 +1595,64 @@ def cmd_push_photo(a):
         if len(box) != 4:
             raise AdbError("--crop требует 4 числа: x1,y1,x2,y2")
         im = im.crop(box)
-    out_local = ROOT / "logs" / "pdd_search_ref.jpg"
-    out_local.parent.mkdir(parents=True, exist_ok=True)
+    out_local = _unique_local_photo_path()
     im.save(out_local, "JPEG", quality=92)
-    remote_paths = ["/sdcard/DCIM/Camera/pdd_search_ref.jpg", "/sdcard/Pictures/pdd_search_ref.jpg"]
-    for rp in remote_paths:
-        run_adb(["push", str(out_local), rp])
-        run_adb(["shell", "am", "broadcast", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
-                 "-d", f"file://{rp}"], check=False)
-    out({"ok": True, "local_jpg": str(out_local), "size": list(im.size), "remote": remote_paths,
-         "hint": "Фото добавлено в галерею (первое в списке). В Pinduoduo нажмите иконку фотоаппарата в строке поиска (y=115) и выберите первое фото."})
+    created = []
+    try:
+        with device_lock(SERIAL):
+            for directory in PHOTO_REMOTE_DIRS:
+                remote = _push_unique_remote_photo(out_local, directory)
+                created.append(remote)
+                run_adb(["shell", "am", "broadcast", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
+                         "-d", f"file://{remote}"], check=False)
+    except AdbError as exc:
+        raise AdbError(
+            f"Фото не загружено во все папки. Созданы только: {created or 'нет'}. Ошибка: {exc}") from exc
+    out({"ok": True, "local_jpg": str(out_local), "size": list(im.size), "remote": created,
+         "confirmation": "command_sent",
+         "hint": "Файлы отправлены под уникальными именами; появление в галерее не подтверждено. "
+                 "Проверьте экран. В Pinduoduo нажмите иконку фотоаппарата в строке поиска (y=115) "
+                 "и выберите первое фото."})
 
 
 # ----------------------------------------------------------------- CLI
 def _stale_files(root: Path, cutoff: float):
-    if not root.exists():
+    """Старые обычные файлы; символические ссылки пропускаются целиком.
+
+    Ссылки не разыменовываются и не удаляются: цель ссылки вне разрешённой
+    области не затрагивается. Символическая ссылка на сам корень тоже не
+    обходится.
+    """
+    if not root.exists() or root.is_symlink():
         return []
     stale = []
-    for path in root.rglob("*"):
-        try:
-            if path.is_file() and path.stat().st_mtime < cutoff:
-                stale.append(path)
-        except OSError:
-            continue
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = [d for d in dirnames if not Path(dirpath, d).is_symlink()]
+        for name in filenames:
+            path = Path(dirpath, name)
+            try:
+                if path.is_symlink():
+                    continue
+                if path.is_file() and path.stat().st_mtime < cutoff:
+                    stale.append(path)
+            except OSError:
+                continue
     return stale
+
+
+def _log_root(name):
+    """Разрешённая папка логов; символическая ссылка или выход наружу отсекаются."""
+    base = ROOT / "logs"
+    root = base / name
+    try:
+        if base.is_symlink() or root.is_symlink():
+            return None
+        resolved = root.resolve()
+        if not resolved.is_relative_to(base.resolve()):
+            return None
+    except OSError:
+        return None
+    return root
 
 
 def cmd_clean(a):
@@ -1187,30 +1660,59 @@ def cmd_clean(a):
         raise AdbError("--days должен быть не меньше 1")
     cutoff = time.time() - a.days * 86400
     names = ("screens", "chats", "dossiers", "ui")
-    targets = []
+    found = []
+    roots = []
     for name in names:
-        targets += _stale_files(ROOT / "logs" / name, cutoff)
-    total = sum(path.stat().st_size for path in targets if path.exists())
+        root = _log_root(name)
+        if root is None:
+            continue
+        roots.append(root)
+        found += _stale_files(root, cutoff)
+    total = 0
+    for path in found:
+        try:
+            total += path.lstat().st_size
+        except OSError:
+            pass
+    deleted = []
+    failures = []
     if a.apply:
-        for path in targets:
+        for path in found:
             try:
                 path.unlink()
-            except OSError:
-                pass
-        for name in names:
-            root = ROOT / "logs" / name
-            if not root.exists():
+                deleted.append(path)
+            except OSError as exc:
+                failures.append({"path": str(path), "error": exc.strerror or str(exc)})
+        for root in roots:
+            if not root.exists() or root.is_symlink():
                 continue
-            for folder in sorted((p for p in root.rglob("*") if p.is_dir()),
-                                 key=lambda p: len(p.parts), reverse=True):
+            for folder in sorted(
+                    (p for p in root.rglob("*") if p.is_dir() and not p.is_symlink()),
+                    key=lambda p: len(p.parts), reverse=True):
                 try:
                     folder.rmdir()
                 except OSError:
                     pass
-    out({"ok": True, "days": a.days, "files": len(targets), "bytes": total,
-         "applied": bool(a.apply),
-         "hint": "Без --apply только считает; с --apply удаляет файлы старше срока. "
-                 "Профиль браузера, state.json и tools/ не затрагиваются."})
+    if not a.apply:
+        status = "dry_run"
+    elif failures and deleted:
+        status = "partial"
+    elif failures:
+        status = "failed"
+    else:
+        status = "ok"
+    result = {"ok": status in ("dry_run", "ok"), "status": status, "days": a.days,
+              "files": len(found), "found": len(found), "deleted": len(deleted),
+              "failed": len(failures), "bytes": total, "applied": bool(a.apply),
+              "errors": failures,
+              "hint": "Без --apply только считает; с --apply удаляет файлы старше срока. "
+                      "Профиль браузера, state.json и tools/ не затрагиваются. "
+                      "Символические ссылки пропускаются: их цели не читаются и не удаляются."}
+    if a.apply:
+        result["deleted_paths"] = [str(p) for p in deleted]
+    else:
+        result["would_delete"] = [str(p) for p in found]
+    out(result)
 
 
 def main():
@@ -1226,14 +1728,16 @@ def main():
     p.add_argument("--find"); p.add_argument("--all-packages", action="store_true")
     p = sp.add_parser("ui-short-idle", help="Только просмотр активного окна с коротким ожиданием; не для нажатий")
     p.add_argument("--find")
-    p = sp.add_parser("tap"); p.add_argument("x", type=float); p.add_argument("y", type=float); p.add_argument("--long", type=int, default=0); p.add_argument("--force", action="store_true", help="Пропустить проверку неизвестных слоёв (жёсткие запреты сохраняются)")
-    p = sp.add_parser("tapel"); p.add_argument("indices", type=int, nargs="+"); p.add_argument("--long", type=int, default=0)
-    p = sp.add_parser("scroll"); p.add_argument("direction", choices=["down", "up", "left", "right"])
+    p = sp.add_parser("tap"); p.add_argument("x", type=float); p.add_argument("y", type=float); p.add_argument("--long", type=int, default=0, help="Сохранён для совместимости, но заблокирован как жест до приёмки guard'а жестов"); p.add_argument("--force", action="store_true", help="Пропустить проверку неизвестных слоёв (жёсткие запреты сохраняются)")
+    p = sp.add_parser("tapel"); p.add_argument("indices", type=int, nargs="+"); p.add_argument("--long", type=int, default=0, help="Сохранён для совместимости, но заблокирован как жест до приёмки guard'а жестов")
+    p = sp.add_parser("scroll", help="Заблокировано до приёмки геометрии и guard'а жестов")
+    p.add_argument("direction", choices=["down", "up", "left", "right"])
     p.add_argument("--amount", type=float, default=0.6); p.add_argument("--ms", type=int, default=450)
-    p = sp.add_parser("swipe")
+    p = sp.add_parser("swipe", help="Заблокировано до приёмки геометрии и guard'а жестов")
     for k in ("x1", "y1", "x2", "y2"):
         p.add_argument(k, type=float)
     p.add_argument("--ms", type=int, default=400)
+    sp.add_parser("close-player", help="Явно закрыть подтверждённый мини-плеер; чтение само не нажимает")
     p = sp.add_parser("text"); p.add_argument("text", nargs="?"); p.add_argument("--file")
     p.add_argument("--enter", action="store_true"); p.add_argument("--clear", action="store_true")
     p = sp.add_parser("key"); p.add_argument("key")
@@ -1250,7 +1754,7 @@ def main():
         a.cmd = "key"
     fn = {"status": cmd_status, "connect": cmd_connect, "pair": cmd_pair, "install-adbkeyboard": cmd_install_adbkeyboard,
           "screen": cmd_screen, "ui": cmd_ui, "ui-diagnostic": cmd_ui_diagnostic, "ui-short-idle": cmd_ui_short_idle, "tap": cmd_tap, "tapel": cmd_tapel, "scroll": cmd_scroll,
-          "swipe": cmd_swipe, "text": cmd_text, "key": cmd_key, "launch": cmd_launch, "wait": cmd_wait,
+          "swipe": cmd_swipe, "close-player": cmd_close_player, "text": cmd_text, "key": cmd_key, "launch": cmd_launch, "wait": cmd_wait,
           "current": cmd_current, "push-photo": cmd_push_photo, "dossier": cmd_dossier, "clean": cmd_clean}[a.cmd]
     try:
         fn(a)
